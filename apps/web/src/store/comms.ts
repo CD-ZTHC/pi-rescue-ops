@@ -38,6 +38,7 @@ export type CommsEntry =
       images: string[];
     }
   | { kind: 'duty'; id: string; at: number; agentId: CrewId; text: string }
+  | { kind: 'approval'; id: string; at: number; approvalId: string; agentId: CrewId; tool: string; args: unknown; risk: string; expiresAt: number; decision?: string }
   | { kind: 'world'; id: string; at: number; text: string; tone: 'info' | 'warn' | 'ok' | 'danger'; correlationId?: string }
   | { kind: 'notice'; id: string; at: number; level: 'info' | 'warn' | 'error'; text: string };
 
@@ -174,6 +175,16 @@ export class CommsModel {
 
   private applyApp(ev: AppEvent, at: number): boolean {
     switch (ev.kind) {
+      case 'approval.requested':
+        this.push({ kind: 'approval', id: this.id(), at, approvalId: ev.approvalId, agentId: ev.agentId, tool: ev.tool, args: ev.args, risk: ev.risk, expiresAt: ev.expiresAt });
+        return true;
+      case 'approval.resolved': {
+        const e = this.entries.find((x) => x.kind === 'approval' && x.approvalId === ev.approvalId);
+        if (!e || e.kind !== 'approval') return false;
+        e.decision = ev.decision;
+        this.touch(e);
+        return true;
+      }
       case 'operator.echo':
         this.push({ kind: 'operator', id: this.id(), at, target: ev.target, text: ev.text, mode: ev.mode });
         return true;

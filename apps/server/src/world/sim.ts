@@ -271,6 +271,14 @@ export class World {
     return view;
   }
 
+  /** 课程用：直接移除一个信号（不计入错失） */
+  retire(id: string): void {
+    this.mutate((next) => {
+      next.signals = next.signals.filter((s) => s.id !== id);
+    });
+    this.truths.delete(id);
+  }
+
   /** 课程用：立即让某个舱段受损 */
   damageModule(id: ModuleId, status: ModuleStatus, incident?: Incident): void {
     this.mutate((next, events) => {

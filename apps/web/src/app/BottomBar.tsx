@@ -8,7 +8,7 @@ const SPEEDS = [0, 0.5, 1, 2] as const;
 
 export function BottomBar() {
   const world = useWorld((s) => s.world);
-  const { info, lesson } = useUi();
+  const { info, lesson, stepping, paused } = useUi();
   const progress = world ? world.tick / world.shiftTicks : 0;
   return (
     <footer className="panel flex h-12 shrink-0 items-center gap-4 px-3 text-[12px]">
@@ -24,9 +24,26 @@ export function BottomBar() {
       </div>
       {world && <span className="num text-slate-400">{formatTick(world.tick)}</span>}
 
-      <button className="rounded-md border border-slate-700 px-2 py-1 text-slate-500" disabled title="单步调试在 M3 实现">
-        ⏯ {zh.bottom.step}
-      </button>
+      <div className="flex items-center gap-1">
+        <button
+          className={`rounded-md border px-2 py-1 ${stepping ? 'border-violet-400 bg-violet-500/25 text-violet-100' : 'border-slate-700 text-slate-300 hover:text-white'}`}
+          onClick={() => send({ t: 'step.set', enabled: !stepping })}
+          aria-pressed={stepping}
+          title="单步模式：每个 hook 处停住，世界暂停"
+        >
+          ⏯ 单步
+        </button>
+        {stepping && (
+          <button className="rounded-md bg-violet-500/80 px-2 py-1 text-white hover:bg-violet-400 disabled:opacity-40" disabled={!paused} onClick={() => send({ t: 'step.next' })}>
+            下一步 ▶
+          </button>
+        )}
+        {paused && (
+          <span className="num max-w-56 truncate text-[11px] text-violet-200" title={JSON.stringify(paused.detail)}>
+            停在 {paused.agentId}·{paused.at}
+          </span>
+        )}
+      </div>
 
       <div className="flex items-center gap-1">
         <span className="text-slate-400">{zh.bottom.speed}</span>
@@ -64,11 +81,17 @@ export function BottomBar() {
         })}
       </div>
 
+      <button className="shrink-0 rounded-md border border-slate-600 px-2 py-1 text-slate-300 hover:text-white" onClick={() => useUi.setState((s) => ({ policyOpen: !s.policyOpen }))}>
+        ⚙ 策略
+      </button>
+      <button className="shrink-0 rounded-md border border-slate-600 px-2 py-1 text-slate-300 hover:text-white" onClick={() => useUi.setState((s) => ({ benchOpen: !s.benchOpen }))}>
+        🧪 试验台
+      </button>
       <button
         className="shrink-0 rounded-md border border-cyan-500/40 px-2.5 py-1 text-cyan-200 hover:bg-cyan-500/10"
         onClick={() => {
           useUi.setState({ contextOpen: true });
-          send({ t: 'context.request', agentId: 'commander' });
+          send({ t: 'context.request', agentId: useUi.getState().contextAgent });
         }}
       >
         ⧉ {zh.bottom.context}

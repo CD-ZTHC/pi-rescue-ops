@@ -8,6 +8,8 @@ import { LessonPanel } from '../lessons/LessonPanel.tsx';
 import { StarMap } from '../scene/StarMap.tsx';
 import { useUi } from '../store/index.ts';
 import { ContextDrawer } from '../studio/ContextDrawer.tsx';
+import { PolicyPanel } from '../studio/PolicyPanel.tsx';
+import { ToolBench } from '../studio/ToolBench.tsx';
 import { BottomBar } from './BottomBar.tsx';
 import { Panel } from './Panel.tsx';
 import { Toasts } from './Toasts.tsx';
@@ -118,6 +120,8 @@ export function App() {
         <BottomBar />
       </div>
       <ContextDrawer />
+      <PolicyPanel />
+      <ToolBench />
       <Toasts />
       <Lightbox />
     </>

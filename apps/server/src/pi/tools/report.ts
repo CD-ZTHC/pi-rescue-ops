@@ -20,7 +20,7 @@ export function reportBackTool(): AgentTool<typeof Params> {
     executionMode: 'sequential',
     async execute(_id, { summary, findings = [], confidence = 'medium' }) {
       const report = { summary, findings, confidence };
-      return { content: [text(`已交付：${summary}`)], details: report, structuredContent: report, terminate: true };
+      return { content: [text(`已交付：${summary}`)], details: report, structuredContent: report };
     },
   };
 }

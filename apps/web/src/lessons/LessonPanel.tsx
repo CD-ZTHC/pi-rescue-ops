@@ -8,6 +8,7 @@ import { useUi } from '../store/index.ts';
 export function LessonPanel() {
   const lesson = useUi((s) => s.lesson);
   const live = useUi((s) => s.info?.mode === 'live');
+  const policy = useUi((s) => s.policy);
   const [collapsed, setCollapsed] = useState(false);
   if (lesson && collapsed) {
     return (
@@ -46,7 +47,23 @@ export function LessonPanel() {
           </div>
           <div className="mb-2 text-[11.5px] text-violet-200/80">{lesson.meta.capability}</div>
           <p className="leading-relaxed text-slate-300">{lesson.meta.summary}</p>
-          {lesson.meta.toggle && <p className="mt-2 rounded bg-slate-800/70 p-2 text-[11.5px] text-slate-400">关掉它会怎样：{lesson.meta.toggle}</p>}
+          {lesson.meta.toggle && (
+            <div className="mt-2 rounded bg-slate-800/70 p-2 text-[11.5px] text-slate-400">
+              关掉它会怎样：{lesson.meta.toggle}
+              {lesson.meta.toggleKey && (
+                <label className="mt-1.5 flex cursor-pointer items-center gap-2 text-slate-200">
+                  <input
+                    type="checkbox"
+                    className="accent-violet-400"
+                    checked={policy[lesson.meta.toggleKey]}
+                    onChange={(e) => send({ t: 'policy.set', key: lesson.meta.toggleKey!, value: e.target.checked })}
+                  />
+                  <span className="num">{lesson.meta.toggleKey}</span>
+                  {policy[lesson.meta.toggleKey] ? '已开启' : '已关闭——再跑一次看看'}
+                </label>
+              )}
+            </div>
+          )}
           <div className="mt-3 flex gap-2">
             <button
               className="rounded-md bg-violet-500/25 px-2 py-1 text-violet-100 hover:bg-violet-500/40"

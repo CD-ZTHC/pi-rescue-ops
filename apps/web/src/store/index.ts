@@ -1,6 +1,6 @@
 // Zustand：按 slice 划分（§7.1）。runs / comms 是可变模型，按 requestAnimationFrame 合并刷新。
 import { create } from 'zustand';
-import type { AppEvent, CrewId, CrewView, LessonMeta, ServerInfo, ServerMsg, WorldSnapshot } from '@rescue/protocol';
+import { defaultPolicyFlags, type AppEvent, type CrewId, type CrewView, type LessonMeta, type PolicyFlags, type ServerInfo, type ServerMsg, type WorldSnapshot } from '@rescue/protocol';
 import { CommsModel } from './comms.ts';
 import { RunsModel } from './runs.ts';
 
@@ -35,6 +35,15 @@ interface UiSlice {
   contextView?: Extract<AppEvent, { kind: 'context.view' }>;
   toasts: Toast[];
   widths: [number, number];
+  policy: PolicyFlags;
+  stepping: boolean;
+  paused: Extract<AppEvent, { kind: 'step.paused' }> | null;
+  approvals: Array<Extract<AppEvent, { kind: 'approval.requested' }>>;
+  queues: Partial<Record<CrewId, Extract<AppEvent, { kind: 'queue' }>>>;
+  bench: Array<Extract<AppEvent, { kind: 'bench.result' }> & { at: number }>;
+  contextAgent: CrewId;
+  benchOpen: boolean;
+  policyOpen: boolean;
 }
 
 export const useUi = create<UiSlice>(() => ({
@@ -44,6 +53,15 @@ export const useUi = create<UiSlice>(() => ({
   contextOpen: false,
   toasts: [],
   widths: [0.34, 0.36],
+  policy: defaultPolicyFlags(),
+  stepping: false,
+  paused: null,
+  approvals: [],
+  queues: {},
+  bench: [],
+  contextAgent: 'commander',
+  benchOpen: false,
+  policyOpen: false,
 }));
 
 /** 服务端墙钟与本地时钟的偏差：取观测到的最小值（网络延迟只会让差值变大） */
@@ -90,7 +108,15 @@ export function ingest(msg: ServerMsg): void {
       runsModel.reset();
       commsModel.reset();
       useWorld.setState({ world: msg.world, receivedAt: performance.now() });
-      useUi.setState({ info: msg.info, crew: msg.crew, lesson: msg.lesson ? { meta: msg.lesson, status: 'loaded' } : null });
+      useUi.setState({
+        info: msg.info,
+        crew: msg.crew,
+        lesson: msg.lesson ? { meta: msg.lesson, status: 'loaded' } : null,
+        policy: msg.policy,
+        stepping: msg.stepping,
+        paused: msg.paused ? { kind: 'step.paused', ...msg.paused } : null,
+        approvals: msg.approvals,
+      });
       for (const h of msg.history) {
         runsModel.apply(h);
         commsModel.apply(h);
@@ -135,6 +161,28 @@ function applyUi(ev: AppEvent): void {
       return;
     case 'context.view':
       useUi.setState({ contextView: ev });
+      return;
+    case 'policy':
+      useUi.setState({ policy: ev.flags, stepping: ev.stepping, ...(ev.stepping ? {} : { paused: null }) });
+      return;
+    case 'step.paused':
+      useUi.setState({ paused: ev });
+      return;
+    case 'step.resumed':
+      useUi.setState((s) => (s.paused?.agentId === ev.agentId ? { paused: null } : {}));
+      return;
+    case 'approval.requested':
+      useUi.setState((s) => ({ approvals: [...s.approvals, ev] }));
+      return;
+    case 'approval.resolved':
+      useUi.setState((s) => ({ approvals: s.approvals.filter((a) => a.approvalId !== ev.approvalId) }));
+      if (ev.decision === 'timeout') toast('warn', '审批超时，视为否决');
+      return;
+    case 'queue':
+      useUi.setState((s) => ({ queues: { ...s.queues, [ev.agentId]: ev } }));
+      return;
+    case 'bench.result':
+      useUi.setState((s) => ({ bench: [{ ...ev, at: Date.now() }, ...s.bench].slice(0, 20) }));
       return;
   }
 }

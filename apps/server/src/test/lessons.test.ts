@@ -12,7 +12,8 @@ async function runLesson(id: string) {
   station.startFreePlay();
   const msgs: AgentMsg[] = [];
   station.bus.subscribe((m) => m.t === 'agent' && msgs.push(m));
-  const stop = drive(station);
+  // 15ms 一个 tick：课程自动驾驶的审批要等 1.5 秒（约 100 tick），信号不能在这期间过期
+  const stop = drive(station, 15);
   try {
     await station.loadLesson(id, 'faux');
   } finally {
@@ -75,5 +76,70 @@ test('第 6 课：扫描部分失败 isError，structuredContent 仍可供 UI �
   // transcript 里的 toolResult 不含 structuredContent（§2.4）
   const tr = station.commander.agent.state.messages.find((m) => m.role === 'toolResult' && m.toolName === 'scan_sector');
   assert.ok(tr && !('structuredContent' in tr));
+  await station.shutdown();
+});
+
+test('第 7 课：dangerApproval 等待主管决定；否决 → 拦截回传给模型；批准 → 出动', async () => {
+  const { station, msgs } = await runLesson('L07');
+  const [first, , second] = spans(msgs);
+  const firstEnd = first.ev as { isError: boolean; durationMs?: number; result: { content: Array<{ text: string }> } };
+  assert.equal(firstEnd.isError, true);
+  assert.equal(firstEnd.durationMs, undefined, '被拦截的工具没有执行');
+  assert.match(firstEnd.result.content[0].text, /主管否决/);
+  assert.equal((second.ev as { isError: boolean }).isError, false);
+  assert.equal(station.world.drone('D-1')!.status, 'outbound');
+  await station.shutdown();
+});
+
+test('第 9 课：只说话不行动 → finishTurn 返回 continue，并在下一轮前追加提醒', async () => {
+  const { station, msgs } = await runLesson('L09');
+  const requests = msgs.filter((m) => m.ev.type === 'message_start' && m.ev.message.role === 'assistant').length;
+  assert.equal(requests, 2);
+  const nudge = station.commander.agent.state.messages.find((m) => m.role === 'world_event' && m.kind === 'nudge');
+  assert.ok(nudge, '提醒消息写入了上下文');
+  await station.shutdown();
+});
+
+test('第 9 课（关掉修正轮）：运行在第一句话之后就结束', async () => {
+  const station = testStation();
+  station.startFreePlay();
+  station.setPolicy('nudge', false);
+  let requests = 0;
+  station.bus.subscribe((m) => m.t === 'agent' && m.ev.type === 'message_start' && m.ev.message.role === 'assistant' && requests++);
+  await station.loadLesson('L09', 'faux');
+  assert.equal(requests, 1);
+  await station.shutdown();
+});
+
+test('第 10 课：prepareRequest 刷新态势（看到排队期间出现的信号）并升到危机档位', async () => {
+  const station = testStation();
+  station.startFreePlay();
+  const metas: Array<{ thinkingLevel?: string }> = [];
+  const hooks: unknown[] = [];
+  station.bus.subscribe((m) => {
+    if (m.t === 'app' && m.ev.kind === 'request.meta') metas.push(m.ev);
+    if (m.t === 'app' && m.ev.kind === 'hook' && m.ev.hook === 'prepareRequest') hooks.push(m.ev.decision);
+  });
+  const stop = drive(station);
+  await station.loadLesson('L10', 'faux');
+  stop();
+  const total = station.world.snapshot().signals.length;
+  const reply = station.commander.agent.state.messages.filter((m) => m.role === 'assistant').at(-1)!;
+  const text = reply.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+  assert.match(text, new RegExp(`看到 ${total} 个活跃信号`));
+  assert.equal(metas[0].thinkingLevel, 'medium');
+  assert.ok(JSON.stringify(hooks[0]).includes('refreshed'));
+  await station.shutdown();
+});
+
+test('第 11 课：steer 在工具批次之后注入，followUp 在运行将要结束时注入并开启新一轮', async () => {
+  const { station } = await runLesson('L11');
+  const roles = station.commander.agent.state.messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => (m.role === 'operator' ? `operator:${m.urgency}` : m.role === 'toolResult' ? `tool:${m.toolName}` : m.role));
+  const steer = roles.indexOf('operator:steer');
+  const follow = roles.indexOf('operator:followUp');
+  assert.ok(roles[steer - 1] === 'tool:scan_sector', `steer 应紧跟扫描结果：${roles.join(' → ')}`);
+  assert.ok(roles.lastIndexOf('tool:stand_by', follow) < follow && roles[follow - 1] === 'tool:stand_by', `followUp 应在第一次 stand_by 之后：${roles.join(' → ')}`);
   await station.shutdown();
 });

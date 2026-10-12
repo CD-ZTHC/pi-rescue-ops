@@ -43,7 +43,7 @@ function Column(props: { title: string; messages: unknown[] }) {
 }
 
 export function ContextDrawer() {
-  const { contextOpen, contextView } = useUi();
+  const { contextOpen, contextView, contextAgent, crew } = useUi();
   return (
     <AnimatePresence>
       {contextOpen && (
@@ -56,8 +56,22 @@ export function ContextDrawer() {
         >
           <div className="mb-2 flex items-center gap-3">
             <h3 className="font-semibold text-slate-100">{zh.context.title}</h3>
-            <span className="text-[12px] text-slate-400">北辰</span>
-            <button className="ml-auto rounded px-2 py-0.5 text-[12px] text-cyan-200 hover:bg-cyan-500/10" onClick={() => send({ t: 'context.request', agentId: 'commander' })}>
+            <div className="flex overflow-hidden rounded-md border border-slate-700 text-[12px]">
+              {crew.map((c) => (
+                <button
+                  key={c.id}
+                  className={`px-2 py-0.5 ${contextAgent === c.id ? 'bg-slate-700/70' : ''}`}
+                  style={{ color: c.color }}
+                  onClick={() => {
+                    useUi.setState({ contextAgent: c.id });
+                    send({ t: 'context.request', agentId: c.id });
+                  }}
+                >
+                  {c.name}
+                </button>
+              ))}
+            </div>
+            <button className="ml-auto rounded px-2 py-0.5 text-[12px] text-cyan-200 hover:bg-cyan-500/10" onClick={() => send({ t: 'context.request', agentId: contextAgent })}>
               ↻ {zh.context.refresh}
             </button>
             <button className="text-slate-400 hover:text-white" onClick={() => useUi.setState({ contextOpen: false })} aria-label="关闭">

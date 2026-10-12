@@ -10,6 +10,7 @@ import { engineerTools } from '../pi/tools/engineer.ts';
 import { medicTools } from '../pi/tools/medic.ts';
 import { navigatorTools } from '../pi/tools/navigator.ts';
 import { reportBackTool } from '../pi/tools/report.ts';
+import { terminateOnCommit } from '../pi/hooks/after.ts';
 import { normalizeCell, normalizeDrone, normalizeModule, normalizeSector, normalizeSignal } from '../pi/tools/shared.ts';
 
 function setup(seed = 21) {
@@ -147,11 +148,14 @@ test('医疗官：分级 → 体征图 → 收治；床位不足时拒绝', asyn
   assert.equal((await run('prepare_medbay', { patientId: p.id, members: [2] })).isError, true);
 });
 
-test('提交型工具返回 terminate', async () => {
+test('提交型工具自身不带 terminate：由 afterToolCall 的 terminateOnCommit 统一补上', async () => {
   const { run } = setup();
-  assert.equal((await run('stand_by', { reason: 'x' })).terminate, true);
-  assert.equal((await run('report_back', { summary: 'ok' })).terminate, true);
-  assert.equal((await run('end_watch', { report: '交班' })).terminate, true);
+  for (const [name, args] of [['stand_by', { reason: 'x' }], ['report_back', { summary: 'ok' }], ['end_watch', { report: '交班' }]] as const) {
+    const r = await run(name, args);
+    assert.equal(r.terminate, undefined);
+    const after = await terminateOnCommit.run({ toolCall: { name }, isError: false } as never, {} as never);
+    assert.deepEqual(after, { terminate: true });
+  }
 });
 
 test('监控网格覆盖 12 格', () => {

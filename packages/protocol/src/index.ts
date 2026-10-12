@@ -23,9 +23,36 @@ export interface CrewView {
 export interface ToolMeta {
   name: string;
   label: string;
+  description: string;
   executionMode?: 'parallel' | 'sequential';
   /** §5.4 记号：OS / ↻ / IMG / ⚠ / ⏹ */
   flags: string[];
+  /** TypeBox schema（即 JSON Schema），工具试验台据此生成表单 */
+  parameters: unknown;
+}
+
+/** 可单独开关的策略（§5.1「每个课程只启用自己要讲的那一个 hook」，以及「关掉它会怎样」） */
+export const POLICY_FLAGS = {
+  staleGuard: { label: '过期拦截', hook: 'beforeToolCall', default: true },
+  budgetGuard: { label: '预算拦截', hook: 'beforeToolCall', default: true },
+  dangerApproval: { label: '危险操作审批', hook: 'beforeToolCall', default: true },
+  autoApprove: { label: '自动批准（无人值守）', hook: 'beforeToolCall', default: false },
+  audit: { label: '审计', hook: 'afterToolCall', default: true },
+  redact: { label: '个人信息打码', hook: 'afterToolCall', default: true },
+  terminateOnCommit: { label: '提交即终止', hook: 'afterToolCall', default: true },
+  nudge: { label: '修正轮（只说不做时）', hook: 'finishTurn', default: true },
+  situationRefresh: { label: '请求前刷新态势', hook: 'prepareRequest', default: true },
+  crisisMode: { label: '危机模式升档', hook: 'prepareRequest', default: true },
+  fastModel: { label: '临时换快模型', hook: 'prepareRequest', default: false },
+  visionSwitch: { label: '有图时换眼睛', hook: 'prepareRequest', default: false },
+  viewTrim: { label: '视图裁剪', hook: 'transformContext', default: true },
+  compaction: { label: '运行间隙压缩', hook: 'agent_end', default: true },
+  delegation: { label: '指挥官委派专家（关闭则调度器直接派活）', hook: 'tools', default: true },
+} as const;
+export type PolicyKey = keyof typeof POLICY_FLAGS;
+export type PolicyFlags = Record<PolicyKey, boolean>;
+export function defaultPolicyFlags(): PolicyFlags {
+  return Object.fromEntries(Object.entries(POLICY_FLAGS).map(([k, v]) => [k, v.default])) as PolicyFlags;
 }
 
 /** §5.4 中无法从工具定义推导的记号（OS 由 outputSchema 推导） */
@@ -122,7 +149,10 @@ export type AppEvent =
       usage?: { input: number; output: number; reasoning?: number; cacheRead: number; totalTokens: number; cost: number };
       images?: number;
     }
-  | { kind: 'queue'; agentId: CrewId; steer: number; followUp: number }
+  | { kind: 'queue'; agentId: CrewId; steer: number; followUp: number; preview: string[]; steeringMode: 'all' | 'one-at-a-time'; followUpMode: 'all' | 'one-at-a-time' }
+  | { kind: 'policy'; flags: PolicyFlags; stepping: boolean }
+  | { kind: 'step.resumed'; agentId: CrewId }
+  | { kind: 'bench.result'; agentId: CrewId; tool: string; args: unknown; isError: boolean; durationMs?: number; content: unknown[]; structured?: unknown; blocked?: boolean }
   | { kind: 'context.view'; agentId: CrewId; systemPrompt: string; tools: string[]; messages: unknown[]; llmMessages: unknown[] }
   | { kind: 'crew'; crew: CrewView[] }
   | { kind: 'lesson'; lesson: LessonMeta | null; mode?: 'faux' | 'live'; status: 'loaded' | 'running' | 'done' | 'error'; note?: string }
@@ -139,6 +169,8 @@ export interface LessonMeta {
   summary: string;
   /** 「关掉它会怎样」的对比开关说明；为空表示本课没有 */
   toggle?: string;
+  /** 「关掉它会怎样」对应的策略开关，讲义面板可一键切换 */
+  toggleKey?: PolicyKey;
   milestone: string;
   available: boolean;
 }
@@ -159,6 +191,10 @@ export type ServerMsg =
       crew: CrewView[];
       info: ServerInfo;
       lesson?: LessonMeta | null;
+      policy: PolicyFlags;
+      stepping: boolean;
+      paused?: { agentId: CrewId; at: HookName; detail: unknown };
+      approvals: Array<Extract<AppEvent, { kind: 'approval.requested' }>>;
       /** 新连接补上最近的 agent / app 历史（不含 world 补丁：快照已是最新），让 Inspector 与频道不从空白开始 */
       history: Array<Extract<ServerMsg, { t: 'agent' | 'app' }>>;
     }
@@ -183,6 +219,8 @@ export type ClientMsg =
   | { t: 'context.request'; agentId: CrewId }
   | { t: 'lesson.load'; lessonId: string; mode: 'faux' | 'live' }
   | { t: 'lesson.exit' }
+  | { t: 'policy.set'; key: PolicyKey; value: boolean }
+  | { t: 'queue.mode'; target: CrewId | 'all'; steering: 'all' | 'one-at-a-time'; followUp: 'all' | 'one-at-a-time' }
   | { t: 'replay.load'; file: string };
 
 export const CREW_COLORS: Record<CrewId | 'operator' | 'triage' | 'scribe' | 'ground', string> = {

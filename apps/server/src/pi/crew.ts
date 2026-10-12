@@ -1,15 +1,20 @@
 // CrewMember：组装一个船员的 Agent 与全部 hook（§5.1）。
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@earendil-works/pi-agent-core';
-import { getCurrentSystemPrompt, getCurrentTools, isRetryableAssistantError, type AssistantMessage, type Tool } from '@earendil-works/pi-ai';
-import type { CrewId, CrewView, ToolMeta } from '@rescue/protocol';
+import { Agent, runToolCall, type AgentMessage, type AgentTool, type ThinkingLevel } from '@earendil-works/pi-agent-core';
+import { getCurrentSystemPrompt, getCurrentTools, isRetryableAssistantError, type AssistantMessage, type JsonValue, type Tool } from '@earendil-works/pi-ai';
+import type { CrewId, CrewView, PolicyFlags, ToolMeta } from '@rescue/protocol';
 import { CREW_COLORS, TOOL_FLAGS } from '@rescue/protocol';
 import type { Bus } from '../runtime/bus.ts';
 import type { World } from '../world/sim.ts';
+import { audit, markStart, redact, terminateOnCommit } from './hooks/after.ts';
+import { dangerApproval, type ApprovalCenter } from './hooks/approval.ts';
+import { composeAfter, composeBefore, type HookEnv } from './hooks/compose.ts';
+import { budgetGuard, staleGuard } from './hooks/guards.ts';
+import { stepGate, type Stepper } from './hooks/step-gate.ts';
 import { convertToLlm } from './messages.ts';
 import { createRequestProbe, type ModelHub } from './models.ts';
 import { observe } from './observe.ts';
 import { renderBaseSystem, type PromptSpec } from './prompts.ts';
-import { turnBudget } from './turn-policy.ts';
+import { createTurnPolicy } from './turn-policy.ts';
 
 export interface CrewSpec extends PromptSpec {
   id: CrewId;
@@ -17,6 +22,8 @@ export interface CrewSpec extends PromptSpec {
   thinkingLevel: ThinkingLevel;
   maxRequestsPerRun: number;
   tools: (deps: CrewDeps) => AgentTool<any>[];
+  /** 收尾工具：指挥官 stand_by，专家 report_back */
+  commitTool: string;
 }
 
 export interface CrewDeps {
@@ -24,10 +31,28 @@ export interface CrewDeps {
   bus: Bus;
   world: World;
   missionId: string;
+  /** 所有船员共享同一个开关对象：改一处，全员生效 */
+  flags: PolicyFlags;
+  stepper: Stepper;
+  approvals: ApprovalCenter;
   flush?: () => Promise<void>;
+  /** 其他船员（delegate 用） */
+  crew?: (id: CrewId) => CrewMember | undefined;
+  /** 视图裁剪（M4） */
+  transformContext?: (spec: CrewSpec) => ((messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>) | undefined;
+  /** 运行结束、确实空闲之后（压缩、溢出恢复都在这里，M4） */
+  afterRun?: (member: CrewMember, last: AssistantMessage | undefined) => Promise<void>;
+  /** 子 Agent 的事件冒泡到父工具调用时的 parentToolCallId（M5） */
+  parentToolCallId?: () => string | undefined;
 }
 
 export type Delivery = 'auto' | 'prompt' | 'steer' | 'followUp';
+
+export interface QueueState {
+  steer: number;
+  followUp: number;
+  preview: string[];
+}
 
 export interface CrewMember {
   readonly id: CrewId;
@@ -35,6 +60,7 @@ export interface CrewMember {
   readonly agent: Agent;
   readonly runId: string;
   readonly isRunning: boolean;
+  readonly hooks: Pick<Agent, 'beforeToolCall' | 'afterToolCall'>;
   /** 空闲时 prompt；运行中按 mode 选择 steer / followUp（auto 视为 followUp） */
   deliver(messages: AgentMessage | AgentMessage[], mode: Delivery): 'prompt' | 'steer' | 'followUp';
   /** 运行并等待结束，返回本轮最后一条 assistant 消息 */
@@ -42,29 +68,67 @@ export interface CrewMember {
   /** 追加到上下文但不触发运行：空闲时立即追加；运行中先暂存，运行结束后追加（避免 followUp 引发额外请求） */
   append(message: AgentMessage): void;
   abort(): void;
+  queue(): QueueState;
+  setQueueModes(steering: 'all' | 'one-at-a-time', followUp: 'all' | 'one-at-a-time'): void;
+  /** 最近一次 report_back 的结构化结果（只能从 tool_execution_end 事件拿到，§2.4） */
+  lastReport(): Record<string, unknown> | undefined;
+  /** 动态工具（M4）：替换可执行工具表，pi 会在下一次请求前写入一条工具差异 system 消息 */
+  setTools(tools: AgentTool<any>[]): void;
+  /** 工具试验台：用 runToolCall 执行，经过与模型调用完全相同的 hook */
+  bench(tool: string, args: unknown): ReturnType<typeof runToolCall>;
   view(): CrewView;
   contextView(): Promise<{ systemPrompt: string; tools: string[]; messages: unknown[]; llmMessages: unknown[] }>;
 }
 
-const toToolDecl = (t: AgentTool<any>): Tool => ({ name: t.name, description: t.description, parameters: t.parameters });
+export const toToolDecl = (t: AgentTool<any>): Tool => ({ name: t.name, description: t.description, parameters: t.parameters });
+
+const preview = (m: AgentMessage): string => {
+  if (m.role === 'operator' || m.role === 'world_event') return m.text;
+  if (m.role === 'situation') return `态势（${m.reasons.join('、')}）`;
+  if (m.role === 'user') return typeof m.content === 'string' ? m.content : '[多段内容]';
+  return m.role;
+};
 
 export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   const probe = createRequestProbe();
-  const tools = spec.tools(deps);
+  let tools = spec.tools(deps);
   const base = renderBaseSystem(spec, deps.world.snapshot());
   let lastError: string | undefined;
   let running = false;
   let deferred: AgentMessage[] = [];
-  const toolMeta: ToolMeta[] = tools.map((t) => ({
-    name: t.name,
-    label: t.label,
-    executionMode: t.executionMode,
-    flags: [...(t.outputSchema ? ['OS'] : []), ...(TOOL_FLAGS[t.name] ?? [])],
-  }));
+  let report: Record<string, unknown> | undefined;
+  const meta = (list: AgentTool<any>[]): ToolMeta[] =>
+    list.map((t) => ({
+      name: t.name,
+      label: t.label,
+      description: t.description,
+      executionMode: t.executionMode,
+      flags: [...(t.outputSchema ? ['OS'] : []), ...(TOOL_FLAGS[t.name] ?? [])],
+      parameters: t.parameters,
+    }));
+  let toolMeta = meta(tools);
 
-  const budget = turnBudget(spec.maxRequestsPerRun, (hook, decision, durationMs) =>
-    deps.bus.app({ kind: 'hook', agentId: spec.id, runId: observer.runId, hook, decision, durationMs }),
-  );
+  const env: HookEnv = {
+    agentId: spec.id,
+    bus: deps.bus,
+    world: deps.world,
+    flags: deps.flags,
+    stepper: deps.stepper,
+    approvals: deps.approvals,
+    runId: () => observer.runId,
+    requestsInRun: () => turns.requests(),
+    maxRequestsPerRun: spec.maxRequestsPerRun,
+  };
+  const turns = createTurnPolicy(env, {
+    role: spec.id,
+    baseThinking: spec.thinkingLevel,
+    commitTool: spec.commitTool,
+    fastModel: () => deps.hub.chat(deps.hub.config.specialistModel),
+    visionModel: () => deps.hub.chat(deps.hub.config.specialistModel),
+    baseModel: () => deps.hub.chat(spec.model),
+  });
+  const beforeToolCall = composeBefore(env, stepGate, staleGuard, budgetGuard, dangerApproval, markStart);
+  const afterToolCall = composeAfter(env, audit, redact, terminateOnCommit);
 
   const agent = new Agent({
     initialState: {
@@ -76,11 +140,16 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     },
     streamFn: deps.hub.createStreamFn(probe),
     convertToLlm,
+    transformContext: deps.transformContext?.(spec),
     sessionId: `${deps.missionId}:${spec.id}`,
     toolExecution: 'parallel',
     steeringMode: 'all',
     followUpMode: 'all',
-    finishTurn: budget.finishTurn,
+    beforeToolCall,
+    afterToolCall,
+    finishTurn: turns.finishTurn,
+    prepareNextTurnWithContext: turns.prepareNextTurnWithContext,
+    prepareRequest: turns.prepareRequest,
     onProviderStreamEvent: probe.onProviderStreamEvent, // 必须同步、轻量
     maxRetryDelayMs: 8_000,
   });
@@ -88,15 +157,27 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   // 队列计数：pi 只提供 peekQueuedMessages，这里按消息对象身份记账，以便 UI 显示「插话 1 / 待办 2」
   const queued = { steer: new Set<AgentMessage>(), followUp: new Set<AgentMessage>() };
   const emitQueue = () =>
-    deps.bus.app({ kind: 'queue', agentId: spec.id, steer: queued.steer.size, followUp: queued.followUp.size });
+    deps.bus.app({
+      kind: 'queue',
+      agentId: spec.id,
+      steer: queued.steer.size,
+      followUp: queued.followUp.size,
+      preview: agent.peekQueuedMessages().map(preview),
+      steeringMode: agent.steeringMode,
+      followUpMode: agent.followUpMode,
+    });
 
   const observer = observe(spec.id, {
     bus: deps.bus,
     probe,
     flush: deps.flush,
+    parentToolCallId: deps.parentToolCallId,
     onRun: (phase) => {
       running = phase === 'start';
-      if (phase === 'start') budget.reset();
+      if (phase === 'start') {
+        turns.reset();
+        report = undefined;
+      }
       deps.bus.app({ kind: 'crew', crew: [member.view()] });
     },
   });
@@ -105,6 +186,9 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     if (ev.type === 'message_start' && (queued.steer.delete(ev.message) || queued.followUp.delete(ev.message))) emitQueue();
     if (ev.type === 'message_end' && ev.message.role === 'assistant') {
       lastError = ev.message.stopReason === 'error' ? ev.message.errorMessage : undefined;
+    }
+    if (ev.type === 'tool_execution_end' && ev.toolName === 'report_back' && !ev.isError) {
+      report = ev.result?.structuredContent as Record<string, unknown>;
     }
   });
 
@@ -130,6 +214,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     id: spec.id,
     spec,
     agent,
+    hooks: { beforeToolCall, afterToolCall },
     get runId() {
       return observer.runId;
     },
@@ -152,15 +237,20 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       emitQueue();
       return kind;
     },
-    run(messages) {
+    async run(messages) {
       running = true;
-      return runToEnd(() => agent.prompt(messages)).finally(() => {
+      let last: AssistantMessage | undefined;
+      try {
+        last = await runToEnd(() => agent.prompt(messages));
+      } finally {
         running = agent.state.isStreaming;
         if (!running && deferred.length) {
           agent.state.messages = [...agent.state.messages, ...deferred];
           deferred = [];
         }
-      });
+      }
+      if (!agent.state.isStreaming) await deps.afterRun?.(member, last);
+      return last;
     },
     append(message) {
       if (member.isRunning) deferred.push(message);
@@ -168,6 +258,41 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     },
     abort() {
       agent.abort();
+    },
+    queue() {
+      return { steer: queued.steer.size, followUp: queued.followUp.size, preview: agent.peekQueuedMessages().map(preview) };
+    },
+    setQueueModes(steering, followUp) {
+      agent.steeringMode = steering;
+      agent.followUpMode = followUp;
+      emitQueue();
+    },
+    lastReport: () => report,
+    setTools(next) {
+      tools = next;
+      toolMeta = meta(next);
+      agent.state.tools = next;
+      deps.bus.app({ kind: 'crew', crew: [member.view()] });
+    },
+    bench(tool, args) {
+      const toolCall = { type: 'toolCall' as const, id: `bench-${Date.now().toString(36)}`, name: tool, arguments: (args ?? {}) as Record<string, JsonValue> };
+      const assistantMessage: AssistantMessage = {
+        role: 'assistant',
+        content: [toolCall],
+        api: agent.state.model.api,
+        provider: agent.state.model.provider,
+        model: agent.state.model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'toolUse',
+        timestamp: Date.now(),
+      };
+      return runToolCall(toolCall, {
+        tools: agent.state.tools,
+        assistantMessage,
+        context: { messages: agent.state.messages, tools: agent.state.tools },
+        beforeToolCall,
+        afterToolCall,
+      });
     },
     view() {
       const model = agent.state.model;
@@ -185,7 +310,8 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     },
     async contextView() {
       const messages = agent.state.messages;
-      const llm = await convertToLlm(messages);
+      const view = deps.transformContext?.(spec);
+      const llm = await convertToLlm(view ? await view(messages) : messages);
       return {
         systemPrompt: getCurrentSystemPrompt(llm) ?? '',
         tools: getCurrentTools(llm).map((t) => t.name),
@@ -197,7 +323,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   return member;
 }
 
-function lastAssistant(messages: AgentMessage[]): AssistantMessage | undefined {
+export function lastAssistant(messages: AgentMessage[]): AssistantMessage | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === 'assistant') return m;

@@ -41,6 +41,7 @@ test('离线自由模式：四名船员协同跑完半个班次（救援、值�
   const { offlineConfig } = await import('./helpers.ts');
   const station = new Station(offlineConfig({ seed: 4242 }), { clock: false, journal: false });
   station.startFreePlay();
+  station.setPolicy('autoApprove', true); // 无人值守：危险操作自动批准
   const errors: string[] = [];
   const tools = new Map<string, number>();
   station.bus.subscribe((m) => {

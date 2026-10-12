@@ -64,17 +64,20 @@ function useSize<T extends HTMLElement>() {
   return [ref, size] as const;
 }
 
+/** 绿 = 放行，红 = 拦截，蓝 = 修改了结果或参数，紫 = continue/end 决定（§7.2） */
 function hookColor(m: HookMark): string {
-  if (m.hook === 'finishTurn' || m.hook === 'prepareNextTurn') return '#a78bfa';
-  const d = m.decision as { block?: boolean } | undefined;
-  if (d && typeof d === 'object' && d.block) return '#f43f5e';
-  if (m.hook === 'afterToolCall' || m.hook === 'prepareRequest' || m.hook === 'transformContext') return '#60a5fa';
+  const d = m.decision as { block?: boolean; modified?: string[]; action?: string } | string | undefined;
+  if (m.hook === 'finishTurn' || m.hook === 'prepareNextTurn') return typeof d === 'object' && d?.action === 'default' ? '#10b981' : '#a78bfa';
+  if (typeof d === 'object' && d?.block) return '#f43f5e';
+  if (m.hook === 'afterToolCall') return typeof d === 'object' && d?.modified?.length ? '#60a5fa' : '#10b981';
+  if (m.hook === 'prepareRequest' || m.hook === 'transformContext') return d === 'unchanged' ? '#10b981' : '#60a5fa';
   return '#10b981';
 }
 
 export function Inspector() {
   useModels((s) => s.runs);
   const focus = useUi((s) => s.focus);
+  const paused = useUi((s) => s.paused);
   const crew = useUi((s) => s.crew);
   const running = runsModel.runs.some((r) => r.endedAt === undefined);
   const now = useNow(running);
@@ -172,6 +175,14 @@ export function Inspector() {
               <text x={GUTTER + 8} y={lane.y + 21} fontSize={11} fill="#475569">
                 {zh.inspector.notOnDuty}
               </text>
+            )}
+            {paused?.agentId === lane.id && (
+              <g>
+                <line x1={x(now)} x2={x(now)} y1={lane.y + 2} y2={lane.y + lane.h - 2} stroke="#a78bfa" strokeWidth={2} className="animate-pulse" />
+                <text x={x(now) - 6} y={lane.y + lane.h - 8} textAnchor="end" fontSize={11} fill="#c4b5fd">
+                  ⏸ {paused.at}
+                </text>
+              </g>
             )}
             {lane.active &&
               visible

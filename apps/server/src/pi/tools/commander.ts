@@ -90,7 +90,7 @@ export function endWatchTool(deps: ToolDeps): AgentTool<typeof EndParams> {
       const world = deps.world;
       const accepted = world.enqueue({ type: 'endWatch', report });
       if (!accepted.ok) return failure(`交班未受理：${accepted.reason}`);
-      return { content: [text('交班报告已提交。')], details: { report }, structuredContent: { report, tick: world.tick }, terminate: true };
+      return { content: [text('交班报告已提交。')], details: { report }, structuredContent: { report, tick: world.tick } };
     },
   };
 }
@@ -106,7 +106,7 @@ export function standByTool(): AgentTool<typeof StandByParams> {
     outputSchema: Type.Object({ reason: Type.String() }),
     executionMode: 'sequential',
     async execute(_id, { reason }) {
-      return { content: [text(`已待命：${reason}`)], details: { reason }, structuredContent: { reason }, terminate: true };
+      return { content: [text(`已待命：${reason}`)], details: { reason }, structuredContent: { reason } };
     },
   };
 }

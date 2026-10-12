@@ -8,6 +8,7 @@ import { zh } from '../i18n/zh.ts';
 import { send } from '../net/client.ts';
 import { commsModel, useModels, useUi } from '../store/index.ts';
 import type { CommsEntry } from '../store/comms.ts';
+import { ApprovalCard } from './ApprovalCard.tsx';
 import { ToolCard } from './ToolCard.tsx';
 
 const NAMES: Record<string, string> = { commander: '北辰', navigator: '星梭', engineer: '铆钉', medic: '白鸽' };
@@ -70,6 +71,7 @@ const Entry = memo(function Entry({ entry }: { entry: CommsEntry; rev: number })
         </div>
       )}
       {entry.kind === 'tool' && <ToolCard e={entry} focused={focus === entry.toolCallId} />}
+      {entry.kind === 'approval' && <ApprovalCard e={entry} />}
       {entry.kind === 'duty' && (
         <div className="flex items-center gap-2 text-[11.5px] text-slate-400">
           <span style={{ color: CREW_COLORS[entry.agentId] }}>🛠</span>
@@ -168,6 +170,7 @@ function Composer() {
   const [mode, setMode] = useState<(typeof MODES)[number]>('auto');
   const [text, setText] = useState('');
   const running = crew.find((c) => c.id === target)?.status === 'running';
+  const queue = useUi((s) => s.queues[target]);
   const submit = () => {
     const t = text.trim();
     if (!t) return;
@@ -233,7 +236,26 @@ function Composer() {
           {zh.comms.send}
         </button>
       </div>
-      <div className="mt-1 text-[11px] text-slate-500">{running ? zh.comms.modeHint[mode] : '北辰空闲：消息会直接开始一次运行（prompt）'}</div>
+      <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
+        <span className="min-w-0 flex-1 truncate">
+          {running ? zh.comms.modeHint[mode] : `${NAMES[target]}空闲：消息会直接开始一次运行（prompt）`}
+          {queue && queue.preview.length > 0 && <span className="text-amber-300"> · 下一次注入：{queue.preview.join(' / ')}</span>}
+        </span>
+        <label className="flex shrink-0 items-center gap-1" title="steeringMode / followUpMode：一次注入全部排队消息，还是每次一条">
+          队列
+          <select
+            className="rounded border border-slate-700 bg-slate-900 px-1 py-0.5 text-slate-300"
+            value={queue?.steeringMode ?? 'all'}
+            onChange={(e) => {
+              const m = e.target.value as 'all' | 'one-at-a-time';
+              send({ t: 'queue.mode', target: 'all', steering: m, followUp: m });
+            }}
+          >
+            <option value="all">all</option>
+            <option value="one-at-a-time">one-at-a-time</option>
+          </select>
+        </label>
+      </div>
     </div>
   );
 }

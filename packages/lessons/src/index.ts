@@ -7,7 +7,7 @@ import {
   type FauxResponseStep,
   type Message,
 } from '@earendil-works/pi-ai';
-import type { CrewId, IncidentKind, LessonMeta, ModuleId, ModuleStatus } from '@rescue/protocol';
+import type { CrewId, IncidentKind, LessonMeta, ModuleId, ModuleStatus, PolicyKey } from '@rescue/protocol';
 
 type MetaRow = [index: number, title: string, capability: string, scenario: string, milestone: string];
 
@@ -42,6 +42,10 @@ const SUMMARIES: Record<number, string> = {
   4: '同一条 assistant 消息里的多个工具调用，默认（toolExecution: "parallel"）并发执行：Inspector 中三条扫描纵向叠放。只要批次里有一个工具声明 executionMode: "sequential"（dispatch_drone），整批改为串行，工具条首尾相接。tool_execution_end 按完成顺序发出，而 toolResult 消息仍按调用顺序写入。',
   5: '长任务通过 execute 的第四个参数 onUpdate 流式汇报进度，每次调用都会产生一个 tool_execution_update 事件。工程师修复机库要 8 秒：Inspector 的工具条上每秒一道刻度，频道卡片里显示百分比。onUpdate 只在 execute 运行期间有效，结束后的调用会被忽略。',
   6: 'pi 1.1 的工具结果有两份：content 给模型看，structuredContent 给程序和 UI（必须符合 outputSchema）。业务失败返回 isError: true，而不是抛错——这样 details 与 structuredContent 都能保留下来。传感器受损时扫描只拿到半个扇区：模型看到错误，UI 仍能画出部分结果。注意：核心不会把 structuredContent 写进 transcript，只能从 tool_execution_end 事件获取。',
+  7: 'beforeToolCall 在参数校验之后、执行之前运行，可以返回 { block: true, reason } 拦截。这里的策略链是 stepGate → staleGuard → budgetGuard → dangerApproval：无人机航线经过耀斑区时，dangerApproval 发出审批请求并 await 主管的决定（30 秒超时视为否决）。被拦截的调用以 isError 的工具结果回到模型，模型换了绕行航线再申请。拦截时还可以附带 terminate，让运行在本批工具之后结束。',
+  9: 'finishTurn 在一个 turn 的全部工具结果写入之后、turn_end 之前运行。模型只说话不调用工具时，返回 { action: "continue" } 再要一轮；配合 prepareNextTurnWithContext 在下一轮之前追加一条提醒。注意：无条件返回 continue 会造成死循环，所以这里同时用请求预算兜底（指挥官每次运行最多 6 次请求）。',
+  10: 'prepareRequest 在每次请求之前运行（包括第一次），此时排队的消息已经写入。这里做两件事：把最新那条态势刷新成请求时刻的世界（排队期间又来了 S-03）；存在 ≥2 个危急信号时把思考档位升到 medium。返回的 context / model / thinkingLevel 会替换本次及后续请求的运行时值。',
+  11: 'steer() 的消息在当前 turn 的工具全部执行完之后注入；followUp() 的消息要等运行本来就要结束时才注入，并自动开始下一轮。队列模式默认 "all"：一次注入全部排队消息；改成 "one-at-a-time" 每次只注入一条。peekQueuedMessages() 能预览下一次将被注入的消息，显示在泳道末尾的队列徽章里。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
@@ -55,6 +59,12 @@ export interface LessonStep {
   trigger: { kind: 'situation'; reason: string } | { kind: 'operator'; text: string } | { kind: 'duty'; text: string };
   /** faux 模式下本步要排入的响应 */
   responses: FauxResponseStep[];
+  /** 课程自动驾驶：依次代替主管处理审批（主管抢先点了就以主管为准） */
+  approvals?: Array<'approve' | 'deny'>;
+  /** 某个工具开始执行时，以主管身份插话 */
+  inject?: Array<{ onTool: string; mode: 'steer' | 'followUp'; text: string }>;
+  /** 生成触发消息之后、开始运行之前，世界先发生变化（演示 prepareRequest 刷新态势） */
+  changeBeforeRun?: 'spawn';
 }
 
 export interface LessonScript {
@@ -62,7 +72,15 @@ export interface LessonScript {
   seed: number;
   /** 开课时预先生成的信号数 */
   spawnSignals: number;
-  setup?: { damage?: Array<{ module: ModuleId; status: ModuleStatus; incident?: { kind: IncidentKind; cell: string } }> };
+  setup?: {
+    damage?: Array<{ module: ModuleId; status: ModuleStatus; incident?: { kind: IncidentKind; cell: string } }>;
+    /** 在 S-01 所在星区安排一次耀斑，startIn 秒后爆发 */
+    flareOnFirstSignal?: number;
+    /** 额外生成 n 个「真实且危急」的信号，并预先研判（线索里出现「生命维持遥测断续」） */
+    criticalSignals?: number;
+    /** 本课的策略开关（结束后恢复默认） */
+    policy?: Partial<Record<PolicyKey, boolean>>;
+  };
   steps: LessonStep[];
   /** 回归断言：faux 模式下本课应依次调用的工具 */
   expectTools: string[];
@@ -78,6 +96,7 @@ const firstUnscanned = (messages: Message[]): string => {
 };
 
 const lastToolText = (messages: Message[]): string => textOf([...messages].reverse().find((m) => m.role === 'toolResult'));
+const lastUserText = (messages: Message[]): string => textOf([...messages].reverse().find((m) => m.role === 'user'));
 
 const lesson1: LessonScript = {
   meta: meta(1, true, ''),
@@ -254,9 +273,118 @@ const lesson6: LessonScript = {
   ],
 };
 
-const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6].map((l) => [l.meta.id, l]));
+const lesson7: LessonScript = {
+  meta: meta(7, true, '关掉「危险操作审批」：无人机直接闯进耀斑区，燃料翻倍、机体受损', 'dangerApproval'),
+  seed: 1007,
+  spawnSignals: 1,
+  setup: { flareOnFirstSignal: 1 },
+  expectTools: ['dispatch_drone', 'plot_course', 'dispatch_drone', 'stand_by'],
+  steps: [
+    {
+      label: '无人机闯入耀斑区：先被否决，换航线后批准',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      approvals: ['deny', 'approve'],
+      responses: [
+        toolUse([fauxText('S-01 时间紧，直飞。'), fauxToolCall('dispatch_drone', { droneId: 'D-1', signalId: 'S-01', route: 'direct' })]),
+        (context) =>
+          toolUse([
+            fauxThinking(`被拦截：${lastToolText(context.messages).slice(0, 40)}。看看绕行能少暴露多少。`),
+            fauxToolCall('plot_course', { signalId: 'S-01' }),
+          ]),
+        toolUse([fauxText('改走绕行，再申请一次。'), fauxToolCall('dispatch_drone', { droneId: 'D-1', signalId: 'S-01', route: 'safe' })]),
+        toolUse([fauxText('D-1 已出发。'), fauxToolCall('stand_by', { reason: '等待 D-1 回报' })]),
+      ],
+    },
+  ],
+};
 
-function meta(index: number, available: boolean, toggle: string): LessonMeta {
+const lesson9: LessonScript = {
+  meta: meta(9, true, '关掉「修正轮」：模型只说一句话，运行就结束了，什么也没做', 'nudge'),
+  seed: 1009,
+  spawnSignals: 1,
+  expectTools: ['stand_by'],
+  steps: [
+    {
+      label: '模型只说话不行动',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        fauxAssistantMessage([fauxText('我认为应该先观察一下 S-01 的动向。')]),
+        (context) =>
+          toolUse([
+            fauxThinking(`收到提醒：${lastUserText(context.messages)}`),
+            fauxText('明白，按规定用工具表态。'),
+            fauxToolCall('stand_by', { reason: '继续观察 S-01，倒计时还很长' }),
+          ]),
+      ],
+    },
+  ],
+};
+
+const lesson10: LessonScript = {
+  meta: meta(10, true, '关掉「请求前刷新态势」：模型看到的是排队时的旧态势，漏掉刚出现的信号', 'situationRefresh'),
+  seed: 1010,
+  spawnSignals: 0,
+  setup: { criticalSignals: 2 },
+  expectTools: ['stand_by'],
+  steps: [
+    {
+      label: '排队期间来了新信号；两个危急信号触发危机模式',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '例行' },
+      changeBeforeRun: 'spawn',
+      responses: [
+        (context, options) => {
+          const situation = [...context.messages].reverse().map(textOf).find((t) => t.startsWith('【态势')) ?? '';
+          const ids = [...situation.matchAll(/^- (S-\d+)/gm)].map((m) => m[1]);
+          return toolUse([
+            fauxThinking(`思考档位 ${options?.reasoning ?? 'off'}：两个信号生命维持遥测断续，属于危机。`),
+            fauxText(`我看到 ${ids.length} 个活跃信号：${ids.join('、')}。`),
+            fauxToolCall('stand_by', { reason: `态势中共有 ${ids.length} 个信号` }),
+          ]);
+        },
+      ],
+    },
+  ],
+};
+
+const lesson11: LessonScript = {
+  meta: meta(11, true, '把队列模式改成 one-at-a-time：连续两条插话要分两轮注入'),
+  seed: 1011,
+  spawnSignals: 2,
+  expectTools: ['scan_sector', 'inspect_signal', 'stand_by', 'stand_by'],
+  steps: [
+    {
+      label: '扫描进行中，主管先插话（steer）再留一条待办（followUp）',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      inject: [
+        { onTool: 'scan_sector', mode: 'steer', text: '先别等扫描，立刻研判 S-01 的真伪。' },
+        { onTool: 'scan_sector', mode: 'followUp', text: '这一轮做完后，汇报剩余燃料。' },
+      ],
+      responses: [
+        (context) => toolUse([fauxText('扫描 S-01 所在星区。'), fauxToolCall('scan_sector', { sector: firstUnscanned(context.messages) })]),
+        (context) =>
+          toolUse([
+            fauxThinking(`扫描结果回来了，主管插话：${lastUserText(context.messages)}`),
+            fauxText('收到插话，研判 S-01。'),
+            fauxToolCall('inspect_signal', { signalId: 'S-01' }),
+          ]),
+        toolUse([fauxText('研判完成。'), fauxToolCall('stand_by', { reason: '已按主管要求研判 S-01' })]),
+        (context) =>
+          toolUse([
+            fauxText(`收到待办「${lastUserText(context.messages)}」：剩余燃料见态势。`),
+            fauxToolCall('stand_by', { reason: '已汇报' }),
+          ]),
+      ],
+    },
+  ],
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11].map((l) => [l.meta.id, l]));
+
+function meta(index: number, available: boolean, toggle: string, toggleKey?: PolicyKey): LessonMeta {
   const row = ROWS[index - 1];
   return {
     id: `L${String(index).padStart(2, '0')}`,
@@ -267,6 +395,7 @@ function meta(index: number, available: boolean, toggle: string): LessonMeta {
     milestone: row[4],
     summary: SUMMARIES[index] ?? `本课在 ${row[4]} 实现。`,
     toggle: toggle || undefined,
+    toggleKey,
     available,
   };
 }

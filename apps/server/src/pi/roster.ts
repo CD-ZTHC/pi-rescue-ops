@@ -18,6 +18,7 @@ export function commanderSpec(config: Config): CrewSpec {
     model: config.commanderModel,
     thinkingLevel: 'low',
     maxRequestsPerRun: 6,
+    commitTool: 'stand_by',
     mission: [
       '你统筹整个夜班的救援：研判求救信号、调度无人机与燃料、决定先救谁。',
       '每次被唤醒时先看【态势】，再决定行动。派无人机前先用 inspect_signal 研判真伪，诱饵信号会白白浪费燃料。',
@@ -43,6 +44,7 @@ export function navigatorSpec(config: Config): CrewSpec {
     model: config.specialistModel,
     thinkingLevel: 'off',
     maxRequestsPerRun: 4,
+    commitTool: 'report_back',
     mission: [
       '你负责扫描星区、看雷达成像研判信号真伪、规划航线。',
       '雷达图判读要点：真实遇险船是「橙色热斑 + 一串碎片尾迹」；恶作剧信标是一个干净的白色亮点、没有尾迹。耀斑噪声里可能有假热斑（没有尾迹）。',
@@ -62,6 +64,7 @@ export function engineerSpec(config: Config): CrewSpec {
     model: config.specialistModel,
     thinkingLevel: 'off',
     maxRequestsPerRun: 5,
+    commitTool: 'report_back',
     mission: [
       '你负责舱段的诊断与抢修。',
       '流程：diagnose_module 看读数 → inspect_camera 看监控，在 4×3 网格（A1–D3）里找出火点 / 烟雾 / 破口的位置 → 起火或冒烟先 vent_section 排空对应网格 → repair_module 修复。',
@@ -81,6 +84,7 @@ export function medicSpec(config: Config): CrewSpec {
     model: config.specialistModel,
     thinkingLevel: 'off',
     maxRequestsPerRun: 4,
+    commitTool: 'report_back',
     mission: [
       '你负责接回伤员的评估与收治。医疗舱床位只有 4 张，只留给危急者。',
       '体征判读要点：心电 RR 间期忽长忽短或出现宽大畸形波 = 心律不齐；血氧曲线持续下降并跌破 90% 虚线 = 缺氧。两者都是危急。规律心电 + 平稳血氧 = 稳定。',

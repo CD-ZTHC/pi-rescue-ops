@@ -4,10 +4,6 @@ import { operatorMessage } from '../pi/messages.ts';
 import type { Station } from './station.ts';
 
 const LATER: Partial<Record<ClientMsg['t'], string>> = {
-  'approval.decide': 'M3',
-  'step.set': 'M3',
-  'step.next': 'M3',
-  'tool.invoke': 'M3',
   'replay.load': 'M7',
 };
 
@@ -38,6 +34,38 @@ export async function handleOperator(station: Station, msg: ClientMsg): Promise<
       const member = station.crew().find((c) => c.id === msg.agentId);
       if (!member) return;
       bus.app({ kind: 'context.view', agentId: member.id, ...(await member.contextView()) });
+      return;
+    }
+    case 'approval.decide':
+      if (!station.approvals.decide(msg.approvalId, msg.decision, msg.note)) bus.app({ kind: 'notice', level: 'warn', text: '该审批已失效（超时或已处理）' });
+      return;
+    case 'step.set':
+      station.setStepping(msg.enabled);
+      return;
+    case 'step.next':
+      station.stepper.next();
+      return;
+    case 'policy.set':
+      station.setPolicy(msg.key, msg.value);
+      return;
+    case 'queue.mode':
+      for (const c of station.crew()) if (msg.target === 'all' || msg.target === c.id) c.setQueueModes(msg.steering, msg.followUp);
+      return;
+    case 'tool.invoke': {
+      const member = station.member(msg.agentId);
+      if (!member) return;
+      const outcome = await member.bench(msg.tool, msg.args);
+      bus.app({
+        kind: 'bench.result',
+        agentId: member.id,
+        tool: msg.tool,
+        args: msg.args,
+        isError: outcome.isError,
+        durationMs: outcome.durationMs,
+        content: outcome.result.content,
+        structured: outcome.result.structuredContent,
+        blocked: outcome.isError && outcome.durationMs === undefined,
+      });
       return;
     }
     case 'lesson.load':
