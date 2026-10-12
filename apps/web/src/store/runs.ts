@@ -37,6 +37,8 @@ export interface ToolView {
   blocked?: { by: string; reason: string };
   updates: Array<{ at: number; text?: string }>;
   hooks: HookMark[];
+  /** delegate 工具展开的子 Agent 运行（§5.7） */
+  children: RunView[];
   args?: unknown;
   structured?: unknown;
 }
@@ -58,6 +60,7 @@ export interface RunView {
   outcome?: 'ok' | 'error' | 'aborted';
   turns: TurnView[];
   queue: { steer: number; followUp: number };
+  parentToolCallId?: string;
 }
 
 const SEGMENT_OF: Partial<Record<WireDelta['type'], SegmentKind>> = {
@@ -97,9 +100,13 @@ export class RunsModel {
   private applyAgent(msg: Extract<ServerMsg, { t: 'agent' }>): boolean {
     const { ev, at, agentId, runId } = msg;
     if (ev.type === 'agent_start') {
-      const run: RunView = { agentId, runId, startedAt: at, turns: [], queue: this.queueByAgent.get(agentId) ?? { steer: 0, followUp: 0 } };
+      const run: RunView = { agentId, runId, startedAt: at, turns: [], queue: this.queueByAgent.get(agentId) ?? { steer: 0, followUp: 0 }, parentToolCallId: msg.parentToolCallId };
       this.runs.push(run);
       this.byId.set(runId, run);
+      if (msg.parentToolCallId) {
+        const parent = this.toolById(msg.parentToolCallId);
+        parent?.children.push(run);
+      }
       if (this.runs.length > 200) this.byId.delete(this.runs.shift()!.runId);
       return true;
     }
@@ -134,7 +141,7 @@ export class RunsModel {
         }
         return true;
       case 'tool_execution_start':
-        turn?.tools.push({ toolCallId: ev.toolCallId, name: ev.toolName, start: at, updates: [], hooks: [], args: ev.args });
+        turn?.tools.push({ toolCallId: ev.toolCallId, name: ev.toolName, start: at, updates: [], hooks: [], args: ev.args, children: [] });
         return true;
       case 'tool_execution_update': {
         const tool = this.tool(run, ev.toolCallId);
@@ -212,6 +219,14 @@ export class RunsModel {
       default:
         return false;
     }
+  }
+
+  private toolById(id: string): ToolView | undefined {
+    for (let i = this.runs.length - 1; i >= 0; i--) {
+      const t = this.tool(this.runs[i], id);
+      if (t) return t;
+    }
+    return undefined;
   }
 
   private tool(run: RunView, id: string): ToolView | undefined {

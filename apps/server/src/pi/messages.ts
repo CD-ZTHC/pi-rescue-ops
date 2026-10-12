@@ -56,8 +56,8 @@ export function radioMessage(signalId: string, transcript: string): RadioMessage
   return { role: 'radio', signalId, transcript, timestamp: Date.now() };
 }
 
-export function operatorMessage(text: string, urgency: OperatorMessage['urgency']): OperatorMessage {
-  return { role: 'operator', text, urgency, timestamp: Date.now() };
+export function operatorMessage(text: string, urgency: OperatorMessage['urgency'], images?: OperatorMessage['images']): OperatorMessage {
+  return { role: 'operator', text, urgency, images: images?.length ? images : undefined, timestamp: Date.now() };
 }
 
 const MODULE_STATUS: Record<ModuleStatus, string> = { ok: '正常', damaged: '受损', offline: '离线' };
@@ -115,13 +115,12 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
       case 'world_event':
         out.push({ role: 'user', content: `【站务】${m.text}`, timestamp: m.timestamp });
         return;
-      case 'operator':
-        out.push({
-          role: 'user',
-          content: `【主管 · ${m.urgency === 'steer' ? '插话' : m.urgency === 'followUp' ? '待办' : '指令'}】${m.text}`,
-          timestamp: m.timestamp,
-        });
+      case 'operator': {
+        const head = `【主管 · ${m.urgency === 'steer' ? '插话' : m.urgency === 'followUp' ? '待办' : '指令'}】${m.text}`;
+        // 附图：纯文本模型由 pi-ai 自动降级为占位文本（§2.5）
+        out.push({ role: 'user', content: m.images?.length ? [{ type: 'text', text: head }, ...m.images] : head, timestamp: m.timestamp });
         return;
+      }
       case 'radio':
         out.push({ role: 'user', content: `【无线电 · 信号 ${m.signalId}】${m.transcript}`, timestamp: m.timestamp });
         return;

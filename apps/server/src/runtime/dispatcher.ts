@@ -74,9 +74,11 @@ export class Dispatcher {
       commander.append(worldEventMessage(kind, text, cid));
       return ['commander', 'append'];
     };
+    // 值班任务：autoDuty 时直接派给专家；否则（委派模式）唤醒指挥官，由它决定委派给谁
     const duty = (id: CrewId, text: string): Array<[CrewId, DispatchAction]> => {
+      if (!this.autoDuty) return [['commander', commander.deliver(worldEventMessage('duty', text), 'followUp')]];
       const member = this.deps.crew(id);
-      if (!this.autoDuty || !member) return [];
+      if (!member) return [];
       return [[id, member.deliver(worldEventMessage('duty', text), 'followUp')]];
     };
     switch (ev.type) {
@@ -92,12 +94,12 @@ export class Dispatcher {
       }
       case 'module.damaged':
         return [
-          note('module.damaged', `${MODULE_NAMES[ev.module]}受损（${ev.status === 'offline' ? '离线' : '受损'}${ev.alarm ? `，${ev.alarm}` : ''}）`),
+          ...(this.autoDuty ? [note('module.damaged', `${MODULE_NAMES[ev.module]}受损（${ev.status === 'offline' ? '离线' : '受损'}${ev.alarm ? `，${ev.alarm}` : ''}）`)] : []),
           ...duty('engineer', `${MODULE_NAMES[ev.module]}受损${ev.alarm ? `，${ev.alarm}` : ''}。请诊断并处置。`),
         ];
       case 'patient.arrived':
         return [
-          note('patient.arrived', `伤员组 ${ev.patient.id} 已接回（${ev.patient.count} 人，来自 ${ev.patient.signalId}）`),
+          ...(this.autoDuty ? [note('patient.arrived', `伤员组 ${ev.patient.id} 已接回（${ev.patient.count} 人，来自 ${ev.patient.signalId}）`)] : []),
           ...duty('medic', `伤员组 ${ev.patient.id} 已接回：${ev.patient.count} 人，其中 ${ev.patient.members.length} 人状况不明，${ev.patient.deadlineTick - ev.tick} 秒内需决定是否收治。`),
         ];
       case 'drone.arrived': {

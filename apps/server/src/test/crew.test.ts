@@ -29,6 +29,9 @@ test('第 1 课（faux）：完整事件序列', async () => {
   assert.deepEqual(agentTrace(msgs), [
     'agent_start',
     'turn_start',
+    // 本课关闭了委派：指挥官的工具表变了（+scan_sector −delegate），pi 在请求前写入一条工具差异 system 消息
+    'message_start:system',
+    'message_end:system',
     'message_start:situation',
     'message_end:situation',
     'message_start:assistant',

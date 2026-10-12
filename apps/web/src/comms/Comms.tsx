@@ -10,6 +10,7 @@ import { commsModel, useModels, useUi } from '../store/index.ts';
 import type { CommsEntry } from '../store/comms.ts';
 import { ApprovalCard } from './ApprovalCard.tsx';
 import { ToolCard } from './ToolCard.tsx';
+import { captureMap } from '../scene/StarMap.tsx';
 
 const NAMES: Record<string, string> = { commander: '北辰', navigator: '星梭', engineer: '铆钉', medic: '白鸽' };
 
@@ -187,6 +188,7 @@ function OperatorBubble({ e }: { e: Extract<CommsEntry, { kind: 'operator' }> })
           主管 → {NAMES[e.target]}
         </div>
         <div className="whitespace-pre-wrap">{e.text}</div>
+        {e.image && <img src={e.image} alt="主管附上的态势图" className="mt-1.5 h-[90px] w-[120px] rounded border border-slate-500" />}
       </div>
     </div>
   );
@@ -199,13 +201,16 @@ function Composer() {
   const [target, setTarget] = useState<CrewId>('commander');
   const [mode, setMode] = useState<(typeof MODES)[number]>('auto');
   const [text, setText] = useState('');
+  const [attach, setAttach] = useState(false);
   const running = crew.find((c) => c.id === target)?.status === 'running';
   const queue = useUi((s) => s.queues[target]);
   const submit = () => {
     const t = text.trim();
     if (!t) return;
-    send({ t: 'operator.say', target, text: t, mode });
+    const image = attach ? captureMap?.() : undefined;
+    send({ t: 'operator.say', target, text: t, mode, image });
     setText('');
+    setAttach(false);
   };
   useEffect(() => {
     if (!crew.some((c) => c.id === target) && crew[0]) setTarget(crew[0].id);
@@ -240,6 +245,14 @@ function Composer() {
             </button>
           ))}
         </div>
+        <button
+          className={`rounded-md border px-2 py-1 ${attach ? 'border-cyan-400 bg-cyan-500/20 text-cyan-100' : 'border-slate-700 text-slate-400 hover:text-slate-200'}`}
+          aria-pressed={attach}
+          title={crew.find((c) => c.id === target)?.vision === false ? `${NAMES[target]}看不到图片：将以占位文本送达` : '把当前态势图（320×240）随消息发送'}
+          onClick={() => setAttach(!attach)}
+        >
+          📷 附上态势图
+        </button>
         <button
           className="ml-auto rounded-md border border-rose-500/50 px-2 py-1 text-rose-300 hover:bg-rose-500/15 disabled:opacity-40"
           disabled={!running}

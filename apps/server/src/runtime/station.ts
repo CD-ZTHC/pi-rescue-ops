@@ -74,6 +74,7 @@ export class Station {
       this.journal.attach(this.bus);
     }
     this.dispatcher = new Dispatcher({ crew: (id) => this.members.get(id) });
+    this.dispatcher.autoDuty = !this.flags.delegation;
     this.stepper = new Stepper(this.bus, () => this.world);
     this.approvals = new ApprovalCenter(this.bus);
     this.hub.setAuxBrain(offlineScribe);
@@ -89,7 +90,7 @@ export class Station {
     const sections = { station_status: stationStatusSection(snap), watch_phase: watchPhaseSection(snap.phase) };
     const key = JSON.stringify(sections);
     for (const m of this.crew()) {
-      m.syncTools((name) => toolAvailable(name, this.world));
+      m.syncTools((name) => toolAvailable(name, this.world, m.id, this.flags));
       if (this.lastSections.get(m.id) !== key) {
         if (this.lastSections.has(m.id)) m.patchSections(sections);
         this.lastSections.set(m.id, key);
@@ -99,6 +100,10 @@ export class Station {
 
   setPolicy(key: PolicyKey, value: boolean): void {
     this.flags[key] = value;
+    if (key === 'delegation') {
+      this.dispatcher.autoDuty = !value;
+      if (this.world) this.syncContext();
+    }
     this.bus.app({ kind: 'policy', flags: { ...this.flags }, stepping: this.stepper.enabled });
   }
 
@@ -187,6 +192,7 @@ export class Station {
         if (step.thinkingLevel) member.agent.state.thinkingLevel = step.thinkingLevel;
         this.bus.app({ kind: 'crew', crew: [member.view()] });
         if (mode === 'faux') this.hub.faux.setResponses(step.responses);
+        for (const [k, v] of Object.entries(step.policy ?? {})) this.setPolicy(k as PolicyKey, v);
         if (step.before?.repair) this.world.repairNow(step.before.repair);
         if (step.before?.spawn) for (let i = 0; i < step.before.spawn; i++) this.world.spawnNow();
         const t = step.trigger;
@@ -214,7 +220,7 @@ export class Station {
       this.lesson.status = 'error';
       this.bus.app({ kind: 'lesson', lesson: script.meta, mode, status: 'error', note: String(err) });
     } finally {
-      if (script.setup?.policy) for (const [k, v] of Object.entries(savedFlags)) this.setPolicy(k as PolicyKey, v);
+      if (script.setup?.policy || script.steps.some((st) => st.policy)) for (const [k, v] of Object.entries(savedFlags)) this.setPolicy(k as PolicyKey, v);
       this.contextBudget = savedBudget;
     }
   }
@@ -302,6 +308,17 @@ export class Station {
     }
     for (const [k, v] of Object.entries(setup.policy ?? {})) this.setPolicy(k as PolicyKey, v);
     if (setup.contextBudget) this.contextBudget = setup.contextBudget;
+    if (setup.patient) {
+      for (let i = 0; i < 200; i++) {
+        const s = world.spawnNow();
+        const t = world.truthOf(s.id)!;
+        if (!t.hoax && t.members.length >= 2) {
+          world.admitSurvivors(s.id);
+          break;
+        }
+        world.retire(s.id);
+      }
+    }
     this.syncContext();
   }
 

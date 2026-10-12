@@ -283,6 +283,18 @@ export class World {
     });
   }
 
+  /** 课程用：直接把一个真实信号的幸存者接回站里（跳过飞行） */
+  admitSurvivors(signalId: string): string | undefined {
+    let pid: string | undefined;
+    this.mutate((next, events) => {
+      const s = next.signals.find((x) => x.id === signalId)!;
+      s.status = 'rescued';
+      s.outcome = 'rescued';
+      pid = this.admitInto(next, signalId, this.truths.get(signalId)?.survivors ?? s.survivors, events);
+    });
+    return pid;
+  }
+
   /** 课程用：直接移除一个信号（不计入错失） */
   retire(id: string): void {
     this.mutate((next) => {
@@ -519,25 +531,7 @@ export class World {
     const tick = next.tick;
     const index = next.drones.indexOf(d);
     let patientId: string | undefined;
-    if (d.carrying > 0) {
-      next.score.rescued += d.carrying;
-      const truth = d.targetSignalId ? this.truths.get(d.targetSignalId) : undefined;
-      const members = truth?.members ?? [];
-      if (members.length > 0) {
-        patientId = `P-${String(++this.serial.patient).padStart(2, '0')}`;
-        const patient: PatientView = {
-          id: patientId,
-          signalId: d.targetSignalId!,
-          count: d.carrying,
-          arrivedTick: tick,
-          members: members.map((_, i) => ({ index: i + 1, status: 'unknown' })),
-          deadlineTick: tick + RULES.patient.deadline,
-        };
-        this.patientTruth.set(patientId, [...members]);
-        next.patients.push(patient);
-        events.push({ type: 'patient.arrived', tick, patient: structuredClone(patient) });
-      }
-    }
+    if (d.carrying > 0) patientId = this.admitInto(next, d.targetSignalId!, d.carrying, events);
     events.push({ type: 'drone.returned', tick, droneId: d.id, survivors: d.carrying, patientId, damaged: !!d.damaged, correlationId: d.correlationId });
     Object.assign(d, {
       status: d.damaged ? 'repairing' : 'docked',
@@ -548,6 +542,27 @@ export class World {
       carrying: 0,
       fuelCost: undefined,
     } satisfies Partial<DroneView>);
+  }
+
+  /** 幸存者入站：计入获救；有待评估成员时建立伤员组 */
+  private admitInto(next: WorldSnapshot, signalId: string, count: number, events: WorldEvent[]): string | undefined {
+    const tick = next.tick;
+    next.score.rescued += count;
+    const members = this.truths.get(signalId)?.members ?? [];
+    if (!members.length) return undefined;
+    const patientId = `P-${String(++this.serial.patient).padStart(2, '0')}`;
+    const patient: PatientView = {
+      id: patientId,
+      signalId,
+      count,
+      arrivedTick: tick,
+      members: members.map((_, i) => ({ index: i + 1, status: 'unknown' })),
+      deadlineTick: tick + RULES.patient.deadline,
+    };
+    this.patientTruth.set(patientId, [...members]);
+    next.patients.push(patient);
+    events.push({ type: 'patient.arrived', tick, patient: structuredClone(patient) });
+    return patientId;
   }
 
   private advanceScans(next: WorldSnapshot, events: WorldEvent[]): void {

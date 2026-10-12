@@ -51,6 +51,8 @@ const SUMMARIES: Record<number, string> = {
   12: 'AgentMessage = LLM 消息 + 你声明合并的自定义消息（CustomAgentMessages）。本项目有 situation、radio、world_event、operator、compaction、ui_note 六种。convertToLlm 在每次请求前把它们转成模型能懂的 user 文本：只有最新一条态势完整渲染，旧的折叠成一行；ui_note 直接过滤。打开「模型看到的上下文」抽屉，左边是 agent.state.messages，右边是转换之后的结果。',
   13: '首条 system 消息声明了 mission / rules / tools_guide / station_status / watch_phase 五个 section（稳定在前，易变在后，利于前缀缓存）。机库受损时：station_status 用一条只含 sections 的 system 消息打补丁；dispatch_drone 从 agent.state.tools 移除，pi 在下一次请求前自动写入工具差异。网关不支持中途声明工具（§2.3），所以完整工具表走 tools 参数。',
   14: '三层上下文管理：transformContext 每次请求前做视图裁剪（不改原始消息，永远保留 system 消息，旧图片折叠，超预算时从完整的边界开始裁）；运行间隙（agent 空闲、队列为空）由书记员把最老的一段写成摘要，替换为一条 compaction 消息——这会直接修改 agent.state.messages；遇到上下文溢出时强制压缩再 continue()。本课把预算压到 1800 token，五个信号之后就会看到压缩。',
+  15: '子 Agent 就是一个工具：delegate 的 execute 里 await child.prompt()，返回专家用 report_back 交付的结构化报告。子 Agent 的事件通过 onUpdate 冒泡成父工具的 tool_execution_update，Inspector 据此把 delegate 工具条展开成嵌套子泳道。指挥官在一个回复里并行委派三名专家；父工具被中止时，signal 级联中止子 Agent；子 Agent 正忙时，新任务以 steer 插进它当前的运行。',
+  22: '图片是 ImageContent。model.input 决定 pi-ai 如何处理：glm-5.3 只收文本，图片被 transformMessages 替换为占位文本；glm-5.3-flash 能看图，工具结果里的图片被拆成紧随其后的一条 user 消息。指挥官看不见图，有两种办法：委派给能看图的专家（第二步），或在 prepareRequest 里检测到未分析的图片时临时换成 flash 发这一次请求（第三步，「换眼睛」）。图片也占上下文：每个船员只保留最近 2 张。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
@@ -66,6 +68,8 @@ export interface LessonStep {
     | { kind: 'operator'; text: string }
     | { kind: 'duty'; text: string }
     | { kind: 'custom'; messages: Array<{ role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }> };
+  /** 本步的策略开关（与 setup.policy 一样，课程结束后恢复） */
+  policy?: Partial<Record<PolicyKey, boolean>>;
   /** 本步开始前世界先发生的事 */
   before?: { repair?: ModuleId; spawn?: number };
   /** faux 模式下本步要排入的响应 */
@@ -89,6 +93,8 @@ export interface LessonScript {
     flareOnFirstSignal?: number;
     /** 额外生成 n 个「真实且危急」的信号，并预先研判（线索里出现「生命维持遥测断续」） */
     criticalSignals?: number;
+    /** 生成一个真实信号并直接接回幸存者，建立伤员组（有待评估成员） */
+    patient?: boolean;
     /** 上下文预算（估算 token），课程结束后恢复 */
     contextBudget?: number;
     /** 本课的策略开关（结束后恢复默认） */
@@ -97,6 +103,8 @@ export interface LessonScript {
   steps: LessonStep[];
   /** 回归断言：faux 模式下本课应依次调用的工具 */
   expectTools: string[];
+  /** 多个 Agent 并发时调用顺序不确定：只比较集合 */
+  expectUnordered?: boolean;
 }
 
 const textOf = (m: Message | undefined): string =>
@@ -115,6 +123,7 @@ const lesson1: LessonScript = {
   meta: meta(1, true, ''),
   seed: 1001,
   spawnSignals: 1,
+  setup: { policy: { delegation: false } },
   expectTools: ['scan_sector', 'stand_by'],
   steps: [
     {
@@ -189,6 +198,7 @@ const lesson3: LessonScript = {
   meta: meta(3, true, '去掉 prepareArguments：「c区」也会被 TypeBox 拒绝，模型要多走一轮'),
   seed: 1003,
   spawnSignals: 1,
+  setup: { policy: { delegation: false } },
   expectTools: ['scan_sector', 'scan_sector', 'stand_by'],
   steps: [
     {
@@ -216,6 +226,7 @@ const lesson4: LessonScript = {
   meta: meta(4, true, '把全局 toolExecution 改成 sequential：第一批三次扫描会首尾相接，总耗时变成三倍'),
   seed: 1004,
   spawnSignals: 2,
+  setup: { policy: { delegation: false } },
   expectTools: ['scan_sector', 'scan_sector', 'scan_sector', 'inspect_signal', 'dispatch_drone', 'stand_by'],
   steps: [
     {
@@ -266,7 +277,7 @@ const lesson6: LessonScript = {
   meta: meta(6, true, '不返回 structuredContent：UI 只能显示一行文字，部分扫描结果的卡片消失'),
   seed: 1006,
   spawnSignals: 2,
-  setup: { damage: [{ module: 'sensors', status: 'damaged' }] },
+  setup: { damage: [{ module: 'sensors', status: 'damaged' }], policy: { delegation: false } },
   expectTools: ['scan_sector', 'inspect_signal', 'stand_by'],
   steps: [
     {
@@ -366,6 +377,7 @@ const lesson11: LessonScript = {
   meta: meta(11, true, '把队列模式改成 one-at-a-time：连续两条插话要分两轮注入'),
   seed: 1011,
   spawnSignals: 2,
+  setup: { policy: { delegation: false } },
   expectTools: ['scan_sector', 'inspect_signal', 'stand_by', 'stand_by'],
   steps: [
     {
@@ -499,7 +511,140 @@ const lesson14: LessonScript = {
   })),
 };
 
-const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14].map((l) => [l.meta.id, l]));
+const ROLE_KEY: Record<string, CrewId> = { 值班指挥官: 'commander', 领航员: 'navigator', 工程师: 'engineer', 医疗官: 'medic' };
+
+/**
+ * 多个 Agent 共用一个 faux 队列、又会并发请求时，响应的消费顺序不确定。
+ * 这里把每一步都做成同一个工厂：按 system prompt 认出是谁在请求，再从该角色的脚本里取下一步。
+ */
+function roleScript(script: Partial<Record<CrewId, FauxResponseStep[]>>): FauxResponseStep[] {
+  const cursor: Partial<Record<CrewId, number>> = {};
+  const total = Object.values(script).reduce((n, l) => n + (l?.length ?? 0), 0);
+  const step: FauxResponseStep = (context, options, state, model) => {
+    const role = ROLE_KEY[getCurrentSystemPrompt(context.messages)?.match(/救援站的(\S+?)「/)?.[1] ?? ''];
+    const list = role ? script[role] : undefined;
+    const i = role ? (cursor[role] = (cursor[role] ?? -1) + 1) : 0;
+    const next = list?.[i];
+    if (!next) return fauxAssistantMessage(`（课程脚本里没有 ${role ?? '?'} 的第 ${i + 1} 步）`, { stopReason: 'error', errorMessage: '课程脚本耗尽' });
+    return typeof next === 'function' ? next(context, options, state, model) : next;
+  };
+  return Array.from({ length: total }, () => step);
+}
+
+const lesson15: LessonScript = {
+  meta: meta(15, true, '关掉委派：指挥官看不见监控与体征，只能让调度器把值班任务直接派给专家，失去统筹', 'delegation'),
+  seed: 1015,
+  spawnSignals: 1,
+  setup: { damage: [{ module: 'hangar', status: 'damaged', incident: { kind: 'fire', cell: 'C2' } }], patient: true },
+  expectUnordered: true,
+  expectTools: ['delegate', 'delegate', 'delegate', 'inspect_signal', 'report_back', 'inspect_camera', 'vent_section', 'repair_module', 'report_back', 'assess_survivors', 'read_vitals', 'prepare_medbay', 'report_back', 'stand_by'],
+  steps: [
+    {
+      label: '多线告急：一个回复里并行委派三名专家',
+      thinkingLevel: 'low',
+      approvals: ['approve'],
+      trigger: { kind: 'custom', messages: [{ role: 'world_event', text: '多线告急：S-01 待研判；机库高温告警；伤员组 P-01 已接回。请统筹。' }] },
+      responses: roleScript({
+        commander: [
+          toolUse([
+            fauxThinking('三件事互不依赖，而且都需要看图：并行委派。'),
+            fauxText('三线并行：星梭研判 S-01，铆钉处置机库，白鸽评估 P-01。'),
+            fauxToolCall('delegate', { crew: 'navigator', task: '研判 S-01 的真伪' }),
+            fauxToolCall('delegate', { crew: 'engineer', task: '机库高温告警，诊断并处置' }),
+            fauxToolCall('delegate', { crew: 'medic', task: '评估伤员组 P-01，只收治危急成员' }),
+          ]),
+          (context) =>
+            toolUse([
+              fauxText(`三份报告已到：${context.messages.filter((m) => m.role === 'toolResult').slice(-3).map((m) => textOf(m).split('\n')[0].replace(/^[^：]*：/, '')).join(' / ')}`),
+              fauxToolCall('stand_by', { reason: '三线均已处置' }),
+            ]),
+        ],
+        navigator: [
+          toolUse([fauxToolCall('inspect_signal', { signalId: 'S-01' })]),
+          (context) => toolUse([fauxToolCall('report_back', { summary: `S-01：${lastToolText(context.messages).split('：').at(-1)?.slice(0, 30)}`, findings: [lastToolText(context.messages)] })]),
+        ],
+        engineer: [
+          toolUse([fauxText('先看监控。'), fauxToolCall('inspect_camera', { module: 'hangar' })]),
+          toolUse([fauxText('C2 网格有火光，排空。'), fauxToolCall('vent_section', { module: 'hangar', cell: 'C2' })]),
+          toolUse([fauxToolCall('repair_module', { module: 'hangar' })]),
+          toolUse([fauxToolCall('report_back', { summary: '机库 C2 火情已排空，舱段修复完毕', findings: ['火点在 C2', '修复用时 8 秒'] })]),
+        ],
+        medic: [
+          toolUse([fauxToolCall('assess_survivors', { patientId: 'P-01' })]),
+          toolUse([fauxToolCall('read_vitals', { patientId: 'P-01' })]),
+          (context) => {
+            const members = (lastToolText(context.messages).match(/成员 ([\d、]+)/)?.[1] ?? '1').split('、').map(Number);
+            return toolUse([fauxToolCall('prepare_medbay', { patientId: 'P-01', members: members.slice(0, 1) })]);
+          },
+          (context) => toolUse([fauxToolCall('report_back', { summary: lastToolText(context.messages), findings: [] })]),
+        ],
+      }),
+    },
+  ],
+};
+
+const sawImage = (context: { messages: Message[] }, model: { input: string[] }) =>
+  model.input.includes('image') && context.messages.some((m) => typeof m.content !== 'string' && m.content.some((c) => c.type === 'image'));
+
+const lesson22: LessonScript = {
+  meta: meta(22, true, '打开「有图时换眼睛」：指挥官遇到图片时临时换成 flash 看图，不必委派', 'visionSwitch'),
+  seed: 1022,
+  spawnSignals: 1,
+  expectTools: ['scan_sector', 'stand_by', 'delegate', 'scan_sector', 'report_back', 'stand_by', 'scan_sector', 'stand_by'],
+  steps: [
+    {
+      label: '一、指挥官（纯文本模型）自己扫描：图片被降级为占位文本',
+      thinkingLevel: 'low',
+      policy: { delegation: false, visionSwitch: false },
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: roleScript({
+        commander: [
+          (context) => toolUse([fauxText('我先自己扫描看看。'), fauxToolCall('scan_sector', { sector: firstUnscanned(context.messages) })]),
+          (context, _o, _s, model) =>
+            toolUse([
+              fauxText(sawImage(context, model) ? '我看到了雷达图。' : `我看不见雷达图（${model.id} 只接受文本）。`),
+              fauxToolCall('stand_by', { reason: '需要能看图的船员' }),
+            ]),
+        ],
+      }),
+    },
+    {
+      label: '二、委派：领航员（flash）替指挥官看图',
+      thinkingLevel: 'low',
+      policy: { delegation: true, visionSwitch: false },
+      trigger: { kind: 'situation', reason: '需要研判' },
+      responses: roleScript({
+        commander: [
+          (context) => toolUse([fauxText('委派星梭看雷达。'), fauxToolCall('delegate', { crew: 'navigator', task: `扫描 ${firstUnscanned(context.messages)} 区，判断 S-01 真伪` })]),
+          (context) => toolUse([fauxText(lastToolText(context.messages).split('\n')[0]), fauxToolCall('stand_by', { reason: '已取得专家判读' })]),
+        ],
+        navigator: [
+          (context) => toolUse([fauxToolCall('scan_sector', { sector: lastUserText(context.messages).match(/([A-F]) 区/)?.[1] ?? 'A' })]),
+          (context, _o, _s, model) =>
+            toolUse([fauxToolCall('report_back', { summary: sawImage(context, model) ? `我（${model.id}）看到了雷达成像，可以判读 S-01` : '我也看不见图', findings: [] })]),
+        ],
+      }),
+    },
+    {
+      label: '三、换眼睛：prepareRequest 发现上下文里有未分析的图片，这一次请求临时换成 flash',
+      thinkingLevel: 'low',
+      policy: { delegation: false, visionSwitch: true },
+      trigger: { kind: 'situation', reason: '再看一次' },
+      responses: roleScript({
+        commander: [
+          (context) => toolUse([fauxToolCall('scan_sector', { sector: firstUnscanned(context.messages) })]),
+          (context, _o, _s, model) =>
+            toolUse([
+              fauxText(sawImage(context, model) ? `这一次由 ${model.id} 发出请求，我看到了雷达图。` : '还是看不见。'),
+              fauxToolCall('stand_by', { reason: '已看图' }),
+            ]),
+        ],
+      }),
+    },
+  ],
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14, lesson15, lesson22].map((l) => [l.meta.id, l]));
 
 function meta(index: number, available: boolean, toggle: string, toggleKey?: PolicyKey): LessonMeta {
   const row = ROWS[index - 1];

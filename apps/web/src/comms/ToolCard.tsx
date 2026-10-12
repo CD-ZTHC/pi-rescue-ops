@@ -94,6 +94,7 @@ function Body({ e }: { e: ToolEntry }) {
       );
     case 'prepare_medbay':
       return <div className="mt-1 text-emerald-300">{s.patientId} 成员 {s.members.join('、')} 入住 · 剩余空床 {s.bedsLeft}</div>;
+    case 'delegate':
     case 'report_back':
       return (
         <div className="mt-1 text-slate-200">

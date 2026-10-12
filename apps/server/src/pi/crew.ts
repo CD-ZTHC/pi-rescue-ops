@@ -81,6 +81,8 @@ export interface CrewMember {
   removeTools(names: string[]): void;
   /** system sections 补丁：在下一次 prompt / steer / followUp 的消息批次前插入（§5.3） */
   patchSections(sections: Record<string, string | null>): void;
+  /** 被委派时记录父工具调用（事件带 parentToolCallId，Inspector 据此嵌套） */
+  setParent(toolCallId: string | undefined): void;
   /** 工具试验台：用 runToolCall 执行，经过与模型调用完全相同的 hook */
   bench(tool: string, args: unknown): ReturnType<typeof runToolCall>;
   view(): CrewView;
@@ -101,6 +103,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   let tools = spec.tools(deps);
   let allTools = tools;
   let pendingSections: Record<string, string | null> | undefined;
+  let parent: string | undefined;
   const withSections = (list: AgentMessage[]): AgentMessage[] => {
     if (!pendingSections) return list;
     const sys: AgentMessage = { role: 'system', content: '', sections: pendingSections, timestamp: Date.now() };
@@ -186,7 +189,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     bus: deps.bus,
     probe,
     flush: deps.flush,
-    parentToolCallId: deps.parentToolCallId,
+    parentToolCallId: () => parent ?? deps.parentToolCallId?.(),
     onRun: (phase) => {
       running = phase === 'start';
       if (phase === 'start') {
@@ -253,17 +256,31 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       return kind;
     },
     async run(messages) {
+      // 已在运行（例如调度器刚唤醒了它）：排到这次运行之后，等它空闲
+      if (member.isRunning) {
+        member.deliver(messages, 'followUp');
+        await agent.waitForIdle();
+        while (running) await new Promise((r) => setTimeout(r, 5));
+        return lastAssistant(agent.state.messages);
+      }
       running = true;
       let last: AssistantMessage | undefined;
       const batch = withSections(Array.isArray(messages) ? messages : [messages]);
       try {
         last = await runToEnd(() => agent.prompt(batch));
+        // 竞态：pi 的循环已结束、但 run() 还没返回的这段时间里送达的 steer / followUp 会留在队列里。
+        // continue() 在尾部是 assistant 时会取出一批排队消息继续跑。
+        while (agent.hasQueuedMessages() && !agent.state.isStreaming && last?.stopReason !== 'error' && last?.stopReason !== 'aborted') {
+          last = await runToEnd(() => agent.continue());
+        }
       } finally {
         running = agent.state.isStreaming;
         if (!running && deferred.length) {
           agent.state.messages = [...agent.state.messages, ...deferred];
           deferred = [];
         }
+        // agent_end 时 running 仍为 true：真正结束后再广播一次状态
+        deps.bus.app({ kind: 'crew', crew: [member.view()] });
       }
       if (!agent.state.isStreaming) await deps.afterRun?.(member, last);
       return last;
@@ -304,6 +321,9 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     removeTools(names) {
       allTools = allTools.filter((t) => !names.includes(t.name));
       member.setTools(tools.filter((t) => !names.includes(t.name)));
+    },
+    setParent(id) {
+      parent = id;
     },
     patchSections(sections) {
       pendingSections = { ...pendingSections, ...sections };

@@ -18,9 +18,10 @@ export async function handleOperator(station: Station, msg: ClientMsg): Promise<
       }
       const text = msg.text.trim();
       if (!text) return;
-      if (msg.image) bus.app({ kind: 'notice', level: 'info', text: '附图功能在 M5 开放，本次只发送文字' });
       const urgency = !member.isRunning ? 'prompt' : msg.mode === 'steer' ? 'steer' : 'followUp';
-      const action = member.deliver(operatorMessage(text, urgency), msg.mode);
+      const images = msg.image ? [{ type: 'image' as const, data: msg.image.data, mimeType: msg.image.mimeType }] : undefined;
+      if (images && !member.view().vision) bus.app({ kind: 'notice', level: 'info', text: `${member.spec.name}看不到图片：附图将以占位文本送达` });
+      const action = member.deliver(operatorMessage(text, urgency, images), msg.mode);
       bus.app({ kind: 'operator.echo', target: member.id, text, mode: action });
       return;
     }

@@ -20,7 +20,8 @@ declare module '@earendil-works/pi-agent-core' {
     situation: { role: 'situation'; tick: number; brief: SituationBrief; reasons: string[]; timestamp: number };
     radio: { role: 'radio'; signalId: string; transcript: string; timestamp: number };
     world_event: { role: 'world_event'; kind: string; text: string; correlationId?: string; timestamp: number };
-    operator: { role: 'operator'; text: string; urgency: 'steer' | 'followUp' | 'prompt'; timestamp: number };
+    /** images：主管截图（§3.4「截图提问」） */
+    operator: { role: 'operator'; text: string; urgency: 'steer' | 'followUp' | 'prompt'; images?: Array<{ type: 'image'; data: string; mimeType: string }>; timestamp: number };
     compaction: { role: 'compaction'; summary: string; replacedCount: number; timestamp: number };
     /** 只给 UI，永远不发给模型 */
     ui_note: { role: 'ui_note'; text: string; timestamp: number };

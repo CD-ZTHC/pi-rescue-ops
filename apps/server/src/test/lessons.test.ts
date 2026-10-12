@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ServerMsg } from '@rescue/protocol';
 import { getLesson } from '@rescue/lessons';
-import { drive, testStation } from './helpers.ts';
+import { drive, testStation, until } from './helpers.ts';
+import { worldEventMessage } from '../pi/messages.ts';
 
 type AgentMsg = Extract<ServerMsg, { t: 'agent' }>;
 
@@ -21,7 +22,9 @@ async function runLesson(id: string) {
   }
   assert.equal(station.lesson?.status, 'done', `${id} 未完成`);
   const tools = msgs.flatMap((m) => (m.ev.type === 'tool_execution_start' ? [m.ev.toolName] : []));
-  assert.deepEqual(tools, getLesson(id)!.expectTools);
+  const script = getLesson(id)!;
+  if (script.expectUnordered) assert.deepEqual([...tools].sort(), [...script.expectTools].sort());
+  else assert.deepEqual(tools, script.expectTools);
   return { station, msgs };
 }
 
@@ -182,5 +185,55 @@ test('第 14 课：长班次触发书记员压缩，之后的请求能看到摘�
   assert.ok(compactions.length >= 1, '至少压缩一次');
   assert.match(lastText(station), /我看到了书记员的摘要/);
   assert.equal(station.contextBudget, 24_000, '课程结束后恢复预算');
+  await station.shutdown();
+});
+
+test('第 15 课：三路并行委派；子 Agent 事件带 parentToolCallId，并经 onUpdate 冒泡', async () => {
+  const { station, msgs } = await runLesson('L15');
+  const delegates = msgs.filter((m) => m.agentId === 'commander' && m.ev.type === 'tool_execution_start' && m.ev.toolName === 'delegate').map((m) => (m.ev as { toolCallId: string }).toolCallId);
+  assert.equal(delegates.length, 3);
+  const firstEnd = Math.min(...msgs.filter((m) => m.ev.type === 'tool_execution_end' && m.ev.toolName === 'delegate').map((m) => m.seq));
+  const starts = msgs.filter((m) => m.ev.type === 'tool_execution_start' && m.ev.toolName === 'delegate').map((m) => m.seq);
+  assert.ok(starts.every((s) => s < firstEnd), '三个委派并行执行');
+  for (const crew of ['navigator', 'engineer', 'medic']) {
+    const childStart = msgs.find((m) => m.agentId === crew && m.ev.type === 'agent_start');
+    assert.ok(childStart && delegates.includes(childStart.parentToolCallId!), `${crew} 的运行挂在某个 delegate 下`);
+  }
+  const bubbled = msgs.filter((m) => m.agentId === 'commander' && m.ev.type === 'tool_execution_update' && m.ev.toolName === 'delegate');
+  assert.ok(bubbled.length >= 6);
+  assert.equal(station.world.module('hangar').status, 'ok');
+  await station.shutdown();
+});
+
+test('第 22 课：纯文本指挥官看不见图；委派给 flash 能看；「换眼睛」临时换模型也能看', async () => {
+  const { station } = await runLesson('L22');
+  const said = station.crew().flatMap((c) => c.agent.state.messages).filter((m) => m.role === 'assistant').flatMap((m) => m.content).map((c) => (c.type === 'text' ? c.text : '')).join('|');
+  assert.match(said, /我看不见雷达图（glm-5.3 只接受文本）/);
+  assert.match(said, /我（glm-5.3-flash）看到了雷达成像/);
+  assert.match(said, /这一次由 glm-5.3-flash 发出请求，我看到了雷达图/);
+  assert.equal(station.flags.visionSwitch, false, '课程结束后恢复开关');
+  await station.shutdown();
+});
+
+test('中止级联：中止指挥官时，正在执行委派的子 Agent 一并中止', async () => {
+  const station = testStation();
+  station.startFreePlay(); // 离线大脑：调度器把「受损」站务交给指挥官，指挥官委派工程师
+  const stop = drive(station, 15);
+  station.world.damageModule('hangar', 'damaged', { kind: 'fire', cell: 'B1' });
+  const run = station.commander.run(worldEventMessage('duty', '（已在处置中）'));
+  // 工程师会停在 vent_section 的审批上
+  await until(() => station.approvals.list().length > 0, 10_000);
+  assert.equal(station.member('engineer')!.isRunning, true);
+  station.commander.abort();
+  const last = await run;
+  stop();
+  void last;
+  const delegateResult = station.commander.agent.state.messages.find((m) => m.role === 'toolResult' && m.toolName === 'delegate');
+  assert.ok(delegateResult && delegateResult.role === 'toolResult' && delegateResult.isError, '委派工具以错误结束');
+  assert.equal(station.commander.isRunning, false);
+  await until(() => !station.member('engineer')!.isRunning);
+  const engineerLast = station.member('engineer')!.agent.state.messages.filter((m) => m.role === 'assistant').at(-1);
+  assert.ok(engineerLast, '工程师确实运行过');
+  assert.equal(station.approvals.list().length, 0, '中止时待审批项被撤销');
   await station.shutdown();
 });

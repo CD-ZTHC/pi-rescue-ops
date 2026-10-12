@@ -7,6 +7,7 @@ import {
   fauxThinking,
   fauxToolCall,
   getCurrentSystemPrompt,
+  getCurrentTools,
   type FauxContentBlock,
   type FauxResponseFactory,
   type Message,
@@ -56,7 +57,7 @@ function dockedDrones(situation: string): string[] {
   return [...line.matchAll(/(D-\d)在港/g)].map((m) => m[1]);
 }
 
-function commander(messages: Message[], level?: string) {
+function commander(messages: Message[], level?: string, tools: string[] = []) {
   const batch = lastBatch(messages);
   const situation = latest(messages, '【态势');
   const flare = situation.includes('耀斑');
@@ -77,6 +78,10 @@ function commander(messages: Message[], level?: string) {
       }
       return reply([fauxText(verdict), fauxToolCall('stand_by', { reason: drones.length ? '没有需要出动的真实信号' : '暂无在港无人机' })]);
     }
+    const delegated = batch.filter((r) => r.toolName === 'delegate');
+    if (delegated.length) {
+      return reply([fauxText(delegated.map((r) => textOf(r).split('\n')[0]).join('；')), fauxToolCall('stand_by', { reason: '专家已处置并回报' })]);
+    }
     const dispatched = batch.filter((r) => r.toolName === 'dispatch_drone');
     const reason = dispatched.length
       ? `已派出 ${dispatched.filter((r) => !r.isError).length} 架无人机，等待站务回报`
@@ -84,6 +89,14 @@ function commander(messages: Message[], level?: string) {
     return reply([fauxText('收到。'), fauxToolCall('stand_by', { reason })]);
   }
   const prompt = textOf(messages[messages.length - 1]);
+  // 委派模式：舱段受损、伤员接回作为站务唤醒指挥官，由它决定委派
+  const hasDelegate = tools.includes('delegate');
+  if (hasDelegate && prompt.startsWith('【站务】') && /受损/.test(prompt)) {
+    return reply([fauxText('舱段受损，我看不见监控，委派铆钉处置。'), fauxToolCall('delegate', { crew: 'engineer', task: prompt.replace('【站务】', '') })]);
+  }
+  if (hasDelegate && prompt.startsWith('【站务】') && /伤员组 P-\d+/.test(prompt)) {
+    return reply([fauxText('伤员接回，委派白鸽评估。'), fauxToolCall('delegate', { crew: 'medic', task: prompt.replace('【站务】', '') })]);
+  }
   if (prompt.startsWith('【主管')) {
     return reply([
       ...think(level, '主管有新指示，先确认再执行。'),
@@ -214,12 +227,13 @@ function navigator(messages: Message[]) {
 }
 
 export const offlineBrain: FauxResponseFactory = (context, options) => {
-  const system = getCurrentSystemPrompt(context.messages) ?? '';
+  // 只看首句「你是…救援站的<职务>「<名字>」」：提示词正文里也会提到其他船员的职务
+  const role = (getCurrentSystemPrompt(context.messages) ?? '').match(/救援站的(\S+?)「/)?.[1] ?? '';
   const messages = context.messages.filter((m) => m.role !== 'system');
-  if (system.includes('工程师')) return engineer(messages);
-  if (system.includes('医疗官')) return medic(messages);
-  if (system.includes('领航员')) return navigator(messages);
-  return commander(messages, options?.reasoning);
+  if (role === '工程师') return engineer(messages);
+  if (role === '医疗官') return medic(messages);
+  if (role === '领航员') return navigator(messages);
+  return commander(messages, options?.reasoning, getCurrentTools(context.messages).map((t) => t.name));
 };
 
 /** 书记员的离线版：从记录里挑出信号编号、结论与出动情况，拼成要点 */

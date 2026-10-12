@@ -18,7 +18,7 @@ export type CommsEntry =
       error?: string;
       thinkingLevel?: string;
     }
-  | { kind: 'operator'; id: string; at: number; target: CrewId; text: string; mode: string }
+  | { kind: 'operator'; id: string; at: number; target: CrewId; text: string; mode: string; image?: string }
   | { kind: 'situation'; id: string; at: number; agentId: CrewId; reasons: string[]; signals: number; tick: number }
   | {
       kind: 'tool';
@@ -107,6 +107,15 @@ export class CommsModel {
         if (m.role === 'situation') {
           this.push({ kind: 'situation', id: this.id(), at, agentId, reasons: m.reasons, signals: m.brief.signals.length, tick: m.tick });
           return true;
+        }
+        if (m.role === 'operator' && m.images?.length) {
+          const e = [...this.entries].reverse().find((x) => x.kind === 'operator' && x.text === m.text && !x.image);
+          if (e && e.kind === 'operator') {
+            e.image = `data:${m.images[0].mimeType};base64,${m.images[0].data}`;
+            this.touch(e);
+            return true;
+          }
+          return false;
         }
         if (m.role === 'radio') {
           this.push({ kind: 'radio', id: this.id(), at, signalId: m.signalId, text: m.transcript });

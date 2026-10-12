@@ -3,6 +3,8 @@ import type { CrewId } from '@rescue/protocol';
 import type { Config } from '../config.ts';
 import type { CrewSpec } from './crew.ts';
 import { commanderTools } from './tools/commander.ts';
+import { delegateTool } from './tools/delegate.ts';
+import { compareFramesTool } from './tools/navigator.ts';
 import { engineerTools } from './tools/engineer.ts';
 import { medicTools } from './tools/medic.ts';
 import { navigatorTools } from './tools/navigator.ts';
@@ -22,17 +24,20 @@ export function commanderSpec(config: Config): CrewSpec {
     mission: [
       '你统筹整个夜班的救援：研判求救信号、调度无人机与燃料、决定先救谁。',
       '每次被唤醒时先看【态势】，再决定行动。派无人机前先用 inspect_signal 研判真伪，诱饵信号会白白浪费燃料。',
-      '你看不见图片：雷达成像对你只是一段占位文本。',
+      '你看不见图片：雷达成像、舱段监控、体征波形对你都只是占位文本。需要看图时用 delegate 委派给专家（星梭看雷达、铆钉看监控、白鸽看体征），可以在同一个回复里并行委派。',
+      '舱段受损、伤员接回时，由你决定是否委派、委派给谁。',
       '回复要短：一两句结论，然后用工具行动。',
     ].join('\n'),
     toolsGuide: [
-      'inspect_signal：研判信号真伪（文字线索），可并行研判多个信号。',
+      'delegate：委派专家，返回专家报告。专家能看图，你不能。',
+      'inspect_signal：研判信号真伪（文字线索），可并行研判多个信号；线索不够确定时委派领航员看雷达。',
       'plot_course：比较直飞 / 绕行的耗时、燃料与风险。耀斑区内飞行燃料翻倍、无人机会受损。',
       'dispatch_drone：派在港无人机救援，返回的是回执；救援结果会以【站务】告知。',
       'allocate_fuel：为重要信号预留燃料。end_watch：提前交班。',
       'stand_by：本轮无需行动（或已安排好）时调用并说明理由。每次运行都应以行动或 stand_by 结束。',
     ].join('\n'),
-    tools: (deps) => commanderTools({ world: deps.world }),
+    // 完整工具表：scan_sector 只在关闭委派时出现（M2 的做法），delegate 只在开启委派时出现（见 toolAvailable）
+    tools: (deps) => [...commanderTools({ world: deps.world }), compareFramesTool({ world: deps.world }), delegateTool((id) => deps.crew?.(id))],
   };
 }
 
@@ -105,7 +110,17 @@ export function crewSpecs(config: Config): Record<CrewId, CrewSpec> {
 }
 
 /** 动态工具（§5.3）：舱段状态决定哪些工具可用 */
-export function toolAvailable(name: string, world: { module(id: 'sensors' | 'hangar' | 'medbay' | 'comms'): { status: string } }): boolean {
+export function toolAvailable(
+  name: string,
+  world: { module(id: 'sensors' | 'hangar' | 'medbay' | 'comms'): { status: string } },
+  member: CrewId = 'commander',
+  flags: { delegation: boolean } = { delegation: true },
+): boolean {
+  // 委派模式下，看图的工具只属于领航员；指挥官改用 delegate
+  if (member === 'commander') {
+    if (name === 'delegate') return flags.delegation;
+    if (name === 'scan_sector' || name === 'compare_frames') return !flags.delegation && world.module('sensors').status !== 'offline';
+  }
   switch (name) {
     case 'dispatch_drone':
       return world.module('hangar').status === 'ok';

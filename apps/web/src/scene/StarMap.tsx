@@ -65,11 +65,29 @@ function wedge(g: Graphics, v: Viewport, center: number, inner = INNER, outer = 
   g.closePath();
 }
 
+/** 主管截图提问（§3.4）：导出当前态势图，缩放为 320×240 PNG（约 100 token，§2.5） */
+export let captureMap: (() => { data: string; mimeType: string } | undefined) | undefined;
+
 function Scene() {
   const { app, isInitialised } = useApplication();
 
   useEffect(() => {
     if (!isInitialised) return;
+    captureMap = () => {
+      const src = app.renderer.extract.canvas(app.stage) as HTMLCanvasElement;
+      const out = document.createElement('canvas');
+      out.width = 320;
+      out.height = 240;
+      const ctx = out.getContext('2d');
+      if (!ctx) return undefined;
+      ctx.fillStyle = '#060b18';
+      ctx.fillRect(0, 0, 320, 240);
+      const scale = Math.min(320 / src.width, 240 / src.height);
+      const w = src.width * scale;
+      const h = src.height * scale;
+      ctx.drawImage(src, (320 - w) / 2, (240 - h) / 2, w, h);
+      return { data: out.toDataURL('image/png').split(',')[1], mimeType: 'image/png' };
+    };
     const stars = new Graphics();
     const statics = new Graphics();
     const flares = new Graphics();
@@ -297,6 +315,7 @@ function Scene() {
     };
     app.ticker.add(tick);
     return () => {
+      captureMap = undefined;
       app.ticker.remove(tick);
       app.stage.removeChildren().forEach((c) => c.destroy({ children: true }));
     };

@@ -28,6 +28,7 @@ const REQ_H = 14;
 const TOOL_Y = 50;
 const TOOL_H = 11;
 const TOOL_GAP = 4;
+const NEST_H = 22;
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(serverNow());
@@ -94,15 +95,19 @@ export function Inspector() {
   const onDuty = new Set(crew.map((c) => c.id));
   const sequentialTools = useMemo(() => new Set(crew.flatMap((c) => c.tools.filter((t) => t.executionMode === 'sequential').map((t) => t.name))), [crew]);
 
+  const visibleRuns = runsModel.runs.filter((r) => (r.endedAt ?? now) >= start && r.startedAt <= end);
+  const nestedRows = (id: CrewId) =>
+    Math.max(0, ...visibleRuns.filter((r) => r.agentId === id).flatMap((r) => r.turns.map((t) => t.tools.reduce((n, tl) => n + tl.children.length, 0))));
+  const nestKey = LANES.map((l) => nestedRows(l.id)).join(',');
   const lanes = useMemo(() => {
     let y = 26;
     return LANES.map((l) => {
-      const h = onDuty.has(l.id) ? LANE_ACTIVE : LANE_IDLE;
+      const h = onDuty.has(l.id) ? LANE_ACTIVE + nestedRows(l.id) * NEST_H : LANE_IDLE;
       const lane = { ...l, y, h, active: onDuty.has(l.id) };
       y += h + 8;
       return lane;
     });
-  }, [crew]);
+  }, [crew, nestKey]);
   const totalH = Math.max(size.h, lanes[lanes.length - 1].y + lanes[lanes.length - 1].h + 10);
 
   const ticks = useMemo(() => {
@@ -302,6 +307,11 @@ function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number;
       {turn.hooks.map((m, i) => (
         <Diamond key={i} cx={x(m.at)} cy={y + 14} mark={m} />
       ))}
+      {turn.tools
+        .flatMap((tool) => tool.children.map((child) => ({ tool, child })))
+        .map(({ tool, child }, k) => (
+          <NestedRun key={child.runId} parentStart={tool.start} run={child} y={y + TOOL_Y + Math.max(1, rows.length) * (TOOL_H + TOOL_GAP) + 16 + k * NEST_H} x={x} now={now} />
+        ))}
       {serialBy && turn.tools[0] && (
         <text x={x(turn.tools[0].start)} y={y + TOOL_Y + rows.length * (TOOL_H + TOOL_GAP) + 9} fontSize={9.5} fill="#94a3b8">
           串行：因 {serialBy}
@@ -372,5 +382,33 @@ function Diamond(props: { cx: number; cy: number; mark: HookMark; small?: boolea
     <path d={`M${cx} ${cy - r} L${cx + r} ${cy} L${cx} ${cy + r} L${cx - r} ${cy} Z`} fill={hookColor(mark)} stroke="#0f172a" strokeWidth={1}>
       <title>{`${mark.hook} · ${mark.durationMs.toFixed(2)}ms\n${JSON.stringify(mark.decision)}`}</title>
     </path>
+  );
+}
+
+/** delegate 展开的子 Agent 运行：画成父泳道里的一条细子泳道（§7.2「递归渲染」的简化版） */
+function NestedRun(props: { run: RunView; parentStart: number; y: number; x: (t: number) => number; now: number }) {
+  const { run, y, x, now } = props;
+  const color = CREW_COLORS[run.agentId];
+  const x0 = x(run.startedAt);
+  const x1 = Math.max(x0 + 3, x(run.endedAt ?? now));
+  return (
+    <g>
+      <path d={`M${x(props.parentStart)} ${y - 6} V${y + 8} H${x0}`} fill="none" stroke={color} strokeOpacity={0.5} strokeDasharray="2 2" />
+      <rect x={x0} y={y} width={x1 - x0} height={16} rx={4} fill={color} fillOpacity={0.08} stroke={color} strokeOpacity={0.6} />
+      {run.turns.map((t, i) => (
+        <g key={i}>
+          {t.request && <rect x={x(t.request.start)} y={y + 2} width={Math.max(1.5, x(t.request.end ?? now) - x(t.request.start))} height={5} rx={1} fill={color} opacity={0.75} />}
+          {t.tools.map((tl) => (
+            <rect key={tl.toolCallId} x={x(tl.start)} y={y + 9} width={Math.max(2, x(tl.end ?? now) - x(tl.start))} height={5} rx={1} fill={tl.isError ? '#f43f5e' : color} opacity={0.5}>
+              <title>{tl.name}</title>
+            </rect>
+          ))}
+        </g>
+      ))}
+      <text x={x1 + 4} y={y + 11} fontSize={9.5} fill={color}>
+        {run.agentId === 'navigator' ? '星梭' : run.agentId === 'engineer' ? '铆钉' : run.agentId === 'medic' ? '白鸽' : run.agentId}
+        {run.outcome && run.outcome !== 'ok' ? ` · ${run.outcome}` : ''}
+      </text>
+    </g>
   );
 }
