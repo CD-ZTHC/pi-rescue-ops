@@ -4,7 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "typecheck": "tsc -p apps/server && tsc -p packages/protocol && tsc -p packages/lessons && tsc -p apps/web",
+    "typecheck": "tsc -p apps/server && tsc -p packages/protocol && tsc -p packages/lessons && tsc -p apps/ground-station && tsc -p apps/web",
     "test": "node --test --test-timeout=30000 'apps/server/src/**/*.test.ts'",
     "dev:server": "node --env-file-if-exists=.env --watch apps/server/src/main.ts",
     "dev:web": "npm -w apps/web run dev",

@@ -1,6 +1,6 @@
 // 工具结果卡片：content 是给模型看的，structuredContent 是给这里渲染富卡片的（§5.4「两份结果」）。
 import { CREW_COLORS, MODULE_NAMES, type ModuleId } from '@rescue/protocol';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { zh } from '../i18n/zh.ts';
 import { useUi } from '../store/index.ts';
 import type { CommsEntry } from '../store/comms.ts';
@@ -94,6 +94,10 @@ function Body({ e }: { e: ToolEntry }) {
       );
     case 'prepare_medbay':
       return <div className="mt-1 text-emerald-300">{s.patientId} 成员 {s.members.join('、')} 入住 · 剩余空床 {s.bedsLeft}</div>;
+    case 'run_script':
+      return <ScriptBody e={e} />;
+    case 'ship_registry_lookup':
+      return <RegistryBody e={e} />;
     case 'delegate':
     case 'report_back':
       return (
@@ -160,6 +164,65 @@ export function ToolCard({ e, focused }: { e: ToolEntry; focused: boolean }) {
             </button>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/** 极简 JS 高亮：关键字、字符串、注释、tools.xxx 调用 */
+function highlight(code: string) {
+  const parts = code.split(/(\/\/[^\n]*|`[^`]*`|"[^"]*"|'[^']*'|\b(?:const|let|for|of|await|return|if|else|async)\b|tools\.\w+)/g);
+  return parts.map((p, i) => {
+    if (!p) return null;
+    const cls = p.startsWith('//') ? 'text-slate-500' : /^[`"']/.test(p) ? 'text-emerald-300' : p.startsWith('tools.') ? 'text-cyan-300' : /^(const|let|for|of|await|return|if|else|async)$/.test(p) ? 'text-violet-300' : '';
+    return cls ? <span key={i} className={cls}>{p}</span> : p;
+  });
+}
+
+function ScriptBody({ e }: { e: ToolEntry }) {
+  const d = e.details as { code?: string; nestedCalls?: { calls: Array<{ id: string; name: string; status: string; durationMs?: number; arguments?: unknown; error?: string }>; complete: boolean } } | undefined;
+  const s = e.structured as { ok: boolean; value: unknown; calls: number } | undefined;
+  const code = d?.code ?? String((e.args as { code?: string })?.code ?? '');
+  return (
+    <div className="mt-1 space-y-1">
+      <pre className="num max-h-40 overflow-auto rounded bg-slate-950/80 p-1.5 text-[10.5px] leading-relaxed text-slate-300 scrollbar-thin">{highlight(code)}</pre>
+      {d?.nestedCalls && (
+        <details className="text-[11px] text-slate-400">
+          <summary className="cursor-pointer">
+            嵌套调用 {d.nestedCalls.calls.length} 次（经 runToolCall，走指挥官的 hook）{d.nestedCalls.complete ? '' : ' · 记录不完整'}
+          </summary>
+          <ul className="num mt-1 max-h-32 space-y-0.5 overflow-auto pl-3 scrollbar-thin">
+            {d.nestedCalls.calls.map((c) => (
+              <li key={c.id} className={c.status === 'ok' ? '' : 'text-rose-300'}>
+                ├ {c.name}({JSON.stringify(c.arguments ?? {})}) {c.durationMs !== undefined ? `${c.durationMs.toFixed(1)}ms` : ''} {c.error ?? ''}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {e.summary && <div className="whitespace-pre-wrap text-slate-300">{e.summary}</div>}
+      {s && <div className="num text-[11px] text-slate-500">返回值：{JSON.stringify(s.value)}</div>}
+    </div>
+  );
+}
+
+function RegistryBody({ e }: { e: ToolEntry }) {
+  const [raw, setRaw] = useState(false);
+  const d = e.details as { unredacted?: { structuredContent: Record<string, unknown> }; redacted?: number } | undefined;
+  const shown = (raw ? d?.unredacted?.structuredContent : (e.structured as Record<string, unknown>)) ?? {};
+  return (
+    <div className="mt-1">
+      <dl className="grid grid-cols-[auto_1fr_auto_1fr] gap-x-3 text-[11.5px]">
+        {Object.entries(shown).map(([k, v]) => (
+          <Kv key={k} k={k}>
+            {String(v)}
+          </Kv>
+        ))}
+      </dl>
+      {d?.unredacted && (
+        <button className="mt-1 text-[11px] text-amber-300 hover:underline" onClick={(ev) => (ev.stopPropagation(), setRaw(!raw))}>
+          {raw ? '🔒 显示打码版本（模型看到的）' : `🔓 查看原文（${d.redacted} 处打码，仅界面可见）`}
+        </button>
       )}
     </div>
   );

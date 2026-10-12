@@ -36,7 +36,10 @@ export type CommsEntry =
       args?: unknown;
       /** 工具结果里的图片（data URL） */
       images: string[];
+      details?: unknown;
     }
+  | { kind: 'triage'; id: string; at: number; signalId: string; result: Extract<AppEvent, { kind: 'triage' }>['result']; samples: number; durationMs: number }
+  | { kind: 'review'; id: string; at: number; review: Extract<AppEvent, { kind: 'review' }> }
   | { kind: 'duty'; id: string; at: number; agentId: CrewId; text: string }
   | { kind: 'radio'; id: string; at: number; signalId: string; text: string }
   | { kind: 'system'; id: string; at: number; agentId: CrewId; text: string }
@@ -192,6 +195,7 @@ export class CommsModel {
         entry.summary = firstText(ev.result?.content);
         entry.structured = ev.result?.structuredContent;
         entry.images = imagesOf(ev.result?.content);
+        entry.details = ev.result?.details;
         entry.progressRatio = undefined;
         this.tools.delete(ev.toolCallId);
         this.touch(entry);
@@ -204,6 +208,12 @@ export class CommsModel {
 
   private applyApp(ev: AppEvent, at: number): boolean {
     switch (ev.kind) {
+      case 'triage':
+        this.push({ kind: 'triage', id: this.id(), at, signalId: ev.signalId, result: ev.result, samples: ev.samples, durationMs: ev.durationMs });
+        return true;
+      case 'review':
+        this.push({ kind: 'review', id: this.id(), at, review: ev });
+        return true;
       case 'compaction':
         this.push({ kind: 'compaction', id: this.id(), at, agentId: ev.agentId, before: ev.beforeTokens, after: ev.afterTokens, summary: ev.summary });
         return true;

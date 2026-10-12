@@ -251,3 +251,44 @@ export const offlineScribe: FauxResponseFactory = (context) => {
   ];
   return fauxAssistantMessage(points.map((p) => `- ${p}`).join('\n'));
 };
+
+/** 分诊台的离线版：按信号类型与无线电措辞粗判；用调用序号制造样本间的分歧，演示「采样估计」 */
+export const offlineTriage: FauxResponseFactory = (context, _options, state) => {
+  const raw = textOf(context.messages.filter((m) => m.role === 'user').at(-1));
+  let s: { kind?: string; survivors?: number; remaining?: number; radio?: string } = {};
+  try {
+    s = JSON.parse(raw);
+  } catch {
+    /* 保持空 */
+  }
+  const wobble = state.callCount % 3 === 2; // 每三个样本里有一个「看走眼」
+  const radio = s.radio ?? '';
+  let severity = /生命维持|断续/.test(radio) ? 'critical' : (s.survivors ?? 0) >= 8 ? 'serious' : 'minor';
+  if (wobble) severity = severity === 'critical' ? 'serious' : severity === 'minor' ? 'serious' : 'critical';
+  const remaining = s.remaining ?? 300;
+  const urgency = remaining < 200 ? 3 : remaining < 280 ? 2 : remaining < 360 ? 1 : 0;
+  const hoax = s.kind === 'beacon' ? !wobble : wobble && state.callCount % 2 === 0;
+  return fauxAssistantMessage([fauxToolCall('submit_answers', { severity, urgency, hoax })], { stopReason: 'toolUse' });
+};
+
+/** 一次性调用（书记员 / 分诊台 / 评审）共用一个 faux provider：按 system prompt 分发 */
+export const offlineAux: FauxResponseFactory = (context, options, state, model) => {
+  const system = getCurrentSystemPrompt(context.messages) ?? '';
+  if (system.includes('分诊台')) return offlineTriage(context, options, state, model);
+  if (system.includes('评审')) return offlineJudge(context, options, state, model);
+  return offlineScribe(context, options, state, model);
+};
+
+/** 班末评审的离线版：按结算数字给分，并调用 submit_review */
+export const offlineJudge: FauxResponseFactory = (context) => {
+  const raw = textOf(context.messages.filter((m) => m.role === 'user').at(-1));
+  const num = (k: string) => Number(raw.match(new RegExp(`"${k}":\\s*(-?\\d+)`))?.[1] ?? 0);
+  const rescued = num('rescued');
+  const missed = num('missed');
+  const deaths = num('deaths');
+  const grade = deaths + missed === 0 && rescued > 0 ? 'A' : missed + deaths <= 2 ? 'B' : 'C';
+  return fauxAssistantMessage(
+    [fauxText(`本班获救 ${rescued} 人，错失 ${missed}，死亡 ${deaths}。`), fauxToolCall('submit_review', { grade, strengths: ['先研判再出动'], improvements: missed ? ['倒计时短的信号应优先'] : ['保持节奏'] })],
+    { stopReason: 'toolUse' },
+  );
+};

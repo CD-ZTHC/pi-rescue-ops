@@ -15,6 +15,8 @@ import { createRequestProbe, type ModelHub } from './models.ts';
 import { observe } from './observe.ts';
 import { renderBaseSystem, type PromptSpec } from './prompts.ts';
 import { createTurnPolicy } from './turn-policy.ts';
+import { startRunSpan, traceTool, withTelemetry, type SpanHolder } from './telemetry.ts';
+import type { TelemetryContext } from '@earendil-works/pi-telemetry';
 
 export interface CrewSpec extends PromptSpec {
   id: CrewId;
@@ -44,6 +46,12 @@ export interface CrewDeps {
   afterRun?: (member: CrewMember, last: AssistantMessage | undefined) => Promise<void>;
   /** 子 Agent 的事件冒泡到父工具调用时的 parentToolCallId（M5） */
   parentToolCallId?: () => string | undefined;
+  /** 船员自己（工具构造时还不存在，用 getter；run_script 要用自己的 hook 与上下文） */
+  self?: () => CrewMember;
+  /** span 收集（§5.13） */
+  telemetry?: TelemetryContext;
+  /** 本班次 codemode 的 store（跨次运行的笔记） */
+  codemodeStore?: Record<string, import('@earendil-works/pi-ai').JsonValue>;
 }
 
 export type Delivery = 'auto' | 'prompt' | 'steer' | 'followUp';
@@ -98,9 +106,22 @@ const preview = (m: AgentMessage): string => {
   return m.role;
 };
 
-export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
+export function createCrewMember(spec: CrewSpec, baseDeps: CrewDeps): CrewMember {
+  const deps: CrewDeps = { ...baseDeps, self: () => member };
   const probe = createRequestProbe();
-  let tools = spec.tools(deps);
+  const spans: SpanHolder = {};
+  // 已包装过的工具不再重复包装（syncTools / setTools 会把已包装的工具传回来）
+  const wrapped = new WeakSet<AgentTool<any>>();
+  const traced = (list: AgentTool<any>[]) =>
+    deps.telemetry
+      ? list.map((t) => {
+          if (wrapped.has(t)) return t;
+          const w = traceTool(t, spans);
+          wrapped.add(w);
+          return w;
+        })
+      : list;
+  let tools = traced(spec.tools(deps));
   let allTools = tools;
   let pendingSections: Record<string, string | null> | undefined;
   let parent: string | undefined;
@@ -156,7 +177,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       // 首条 system 消息直接声明 sections 与工具，避免 pi 再追加一条「工具变化」消息
       messages: [{ role: 'system', ...base, toolsAdded: tools.map(toToolDecl), timestamp: Date.now() }],
     },
-    streamFn: deps.hub.createStreamFn(probe),
+    streamFn: withTelemetry(deps.hub.createStreamFn(probe), spans),
     convertToLlm,
     transformContext: deps.transformContext?.(spec),
     sessionId: `${deps.missionId}:${spec.id}`,
@@ -228,6 +249,28 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     return last;
   }
 
+  async function runCore(batch: AgentMessage[]): Promise<AssistantMessage | undefined> {
+    let last: AssistantMessage | undefined;
+    try {
+      last = await runToEnd(() => agent.prompt(batch));
+      // 竞态：pi 的循环已结束、但 run() 还没返回的这段时间里送达的 steer / followUp 会留在队列里。
+      // continue() 在尾部是 assistant 时会取出一批排队消息继续跑。
+      while (agent.hasQueuedMessages() && !agent.state.isStreaming && last?.stopReason !== 'error' && last?.stopReason !== 'aborted') {
+        last = await runToEnd(() => agent.continue());
+      }
+    } finally {
+      running = agent.state.isStreaming;
+      if (!running && deferred.length) {
+        agent.state.messages = [...agent.state.messages, ...deferred];
+        deferred = [];
+      }
+      // agent_end 时 running 仍为 true：真正结束后再广播一次状态
+      deps.bus.app({ kind: 'crew', crew: [member.view()] });
+    }
+    if (!agent.state.isStreaming) await deps.afterRun?.(member, last);
+    return last;
+  }
+
   const member: CrewMember = {
     id: spec.id,
     spec,
@@ -264,26 +307,9 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
         return lastAssistant(agent.state.messages);
       }
       running = true;
-      let last: AssistantMessage | undefined;
       const batch = withSections(Array.isArray(messages) ? messages : [messages]);
-      try {
-        last = await runToEnd(() => agent.prompt(batch));
-        // 竞态：pi 的循环已结束、但 run() 还没返回的这段时间里送达的 steer / followUp 会留在队列里。
-        // continue() 在尾部是 assistant 时会取出一批排队消息继续跑。
-        while (agent.hasQueuedMessages() && !agent.state.isStreaming && last?.stopReason !== 'error' && last?.stopReason !== 'aborted') {
-          last = await runToEnd(() => agent.continue());
-        }
-      } finally {
-        running = agent.state.isStreaming;
-        if (!running && deferred.length) {
-          agent.state.messages = [...agent.state.messages, ...deferred];
-          deferred = [];
-        }
-        // agent_end 时 running 仍为 true：真正结束后再广播一次状态
-        deps.bus.app({ kind: 'crew', crew: [member.view()] });
-      }
-      if (!agent.state.isStreaming) await deps.afterRun?.(member, last);
-      return last;
+      if (!deps.telemetry) return runCore(batch);
+      return startRunSpan(deps.telemetry, spec.id, spans, () => runCore(batch), (last) => ({ requests: turns.requests(), stopReason: last?.stopReason }));
     },
     append(message) {
       if (member.isRunning) deferred.push(message);
@@ -301,7 +327,8 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       emitQueue();
     },
     lastReport: () => report,
-    setTools(next) {
+    setTools(nextRaw) {
+      const next = traced(nextRaw);
       tools = next;
       toolMeta = meta(next);
       agent.state.tools = next;
@@ -313,7 +340,8 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       member.setTools(next);
       return true;
     },
-    addTools(extra) {
+    addTools(extraRaw) {
+      const extra = traced(extraRaw);
       const names = new Set(extra.map((t) => t.name));
       allTools = [...allTools.filter((t) => !names.has(t.name)), ...extra];
       member.setTools([...tools.filter((t) => !names.has(t.name)), ...extra]);

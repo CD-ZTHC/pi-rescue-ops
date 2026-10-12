@@ -69,6 +69,16 @@ export async function handleOperator(station: Station, msg: ClientMsg): Promise<
       });
       return;
     }
+    case 'review.request':
+      await station.review();
+      return;
+    case 'telemetry.request':
+      station.telemetrySnapshot();
+      return;
+    case 'triage.samples':
+      station.hub.triageSamples = Math.max(1, Math.min(9, Math.round(msg.k)));
+      bus.app({ kind: 'notice', level: 'info', text: `分诊采样数 k=${station.hub.triageSamples}` });
+      return;
     case 'lesson.load':
       void station.loadLesson(msg.lessonId, msg.mode);
       return;

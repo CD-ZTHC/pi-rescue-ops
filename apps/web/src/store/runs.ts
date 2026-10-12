@@ -25,6 +25,10 @@ export interface RequestView {
   segments: Array<{ kind: SegmentKind; start: number; end?: number }>;
   usage?: Extract<AppEvent, { kind: 'request.meta' }>['usage'];
   images?: number;
+  rawChunks?: string[];
+  providerEvents?: number;
+  ttftSource?: string;
+  durationSource?: string;
 }
 
 export interface ToolView {
@@ -195,6 +199,10 @@ export class RunsModel {
         req.stopReason = ev.stopReason;
         req.usage = ev.usage;
         req.images = ev.images;
+        req.rawChunks = ev.rawChunks;
+        req.providerEvents = ev.providerEvents;
+        req.ttftSource = ev.ttftSource;
+        req.durationSource = ev.durationSource;
         if (ev.durationMs !== undefined) req.end = ev.startedAt + ev.durationMs;
         this.totalCost += ev.usage?.cost ?? 0;
         this.totalTokens += ev.usage?.totalTokens ?? 0;

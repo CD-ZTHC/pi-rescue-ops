@@ -7,11 +7,17 @@ import type { Config } from '../config.ts';
 import { createCrewMember, type CrewMember } from '../pi/crew.ts';
 import { operatorMessage, radioMessage, situationMessage, worldEventMessage } from '../pi/messages.ts';
 import { createModelHub, type ModelHub } from '../pi/models.ts';
-import { offlineBrain, offlineScribe } from '../pi/offline-brain.ts';
+import { offlineAux, offlineBrain } from '../pi/offline-brain.ts';
 import { crewSpecs, toolAvailable } from '../pi/roster.ts';
 import { afterRunCompactor } from '../pi/compaction.ts';
 import { viewTrim } from '../pi/context.ts';
 import { stationStatusSection, watchPhaseSection } from '../pi/prompts.ts';
+import { GroundStation } from '../pi/tools/ground-station.ts';
+import { isUrgentTriage, triageSignal } from '../pi/triage.ts';
+import { barrierProbe, judgeShift } from '../pi/stateless-judge.ts';
+import { radioTranscript } from '../world/spawner.ts';
+import { InMemoryTelemetryContext } from '@earendil-works/pi-telemetry';
+import type { McpTransport } from '@earendil-works/pi-mcp';
 import { World } from '../world/sim.ts';
 import { Bus } from './bus.ts';
 import { Dispatcher } from './dispatcher.ts';
@@ -27,6 +33,10 @@ export interface StationOptions {
   autoSpawn?: boolean;
   /** 自由模式是否自动产生耀斑（测试可关闭） */
   autoHazards?: boolean;
+  /** 启动 MCP 地面站子进程（测试默认关闭；也可传入自定义 transport） */
+  groundStation?: boolean | (() => McpTransport);
+  /** 自由模式下天气卫星在第几秒上线（地面站随之新增预报工具） */
+  satelliteAt?: number;
 }
 
 export interface LessonState {
@@ -54,6 +64,12 @@ export class Station {
   /** 上下文预算（估算 token）：超过后视图裁剪、运行间隙压缩 */
   contextBudget = 24_000;
   private lastSections = new Map<CrewId, string>();
+  /** span 收集（每次换世界重新开始，避免无限增长） */
+  telemetry = new InMemoryTelemetryContext();
+  ground?: GroundStation;
+  private groundReady?: Promise<void>;
+  private readonly satelliteAt: number;
+  private satelliteOnline = false;
   private offWorld?: () => void;
   private offDispatch?: () => void;
   private readonly clock: boolean;
@@ -73,11 +89,66 @@ export class Station {
       this.journal = new Journal(config.missionsDir, this.missionId);
       this.journal.attach(this.bus);
     }
-    this.dispatcher = new Dispatcher({ crew: (id) => this.members.get(id) });
+    this.dispatcher = new Dispatcher({
+      crew: (id) => this.members.get(id),
+      triage: (signal, radio) => (this.flags.triage ? triageSignal(this.hub, this.world, this.bus, signal, radio).then(isUrgentTriage) : undefined),
+    });
     this.dispatcher.autoDuty = !this.flags.delegation;
     this.stepper = new Stepper(this.bus, () => this.world);
     this.approvals = new ApprovalCenter(this.bus);
-    this.hub.setAuxBrain(offlineScribe);
+    this.hub.setAuxBrain(offlineAux);
+    this.satelliteAt = options.satelliteAt ?? 60;
+    if (options.groundStation) {
+      const transport = typeof options.groundStation === 'function' ? options.groundStation() : undefined;
+      this.groundReady = this.startGroundStation(transport);
+    }
+  }
+
+  private async startGroundStation(transport?: McpTransport): Promise<void> {
+    const gs = new GroundStation({
+      onTools: (tools, added, removed) => {
+        const c = this.members.get('commander');
+        if (c) {
+          if (removed.length) c.removeTools(removed);
+          if (tools.length) c.addTools(tools);
+          this.syncContext();
+        }
+        if (added.length) this.bus.app({ kind: 'notice', level: 'info', text: `地面站工具上线：${added.join('、')}` });
+        if (removed.length) this.bus.app({ kind: 'notice', level: 'warn', text: `地面站工具下线：${removed.join('、')}` });
+      },
+      onClosed: (reason) => this.bus.app({ kind: 'notice', level: 'error', text: `地面站失联：${reason}` }),
+    });
+    try {
+      await gs.connect(transport);
+      this.ground = gs;
+    } catch (err) {
+      this.bus.app({ kind: 'notice', level: 'error', text: `地面站启动失败：${(err as Error).message}` });
+    }
+  }
+
+  /** 等地面站连上（测试与课程用） */
+  async groundStationReady(): Promise<GroundStation | undefined> {
+    await this.groundReady;
+    return this.ground;
+  }
+
+  /** 班末评审（§5.12）：agentLoop 低层循环，同时跑一次 Agent 对照组，量出屏障语义的差别 */
+  async review(): Promise<void> {
+    const snap = this.world.snapshot();
+    const summary = { ...snap.score, tick: snap.tick, signals: snap.signals.length, flares: this.dispatcher.log.filter((r) => r.event === 'flare.warning').length };
+    const review = await judgeShift(this.hub, summary);
+    const agentBarrier = await barrierProbe(this.hub);
+    this.bus.app({ kind: 'review', ...review, agentBarrier });
+  }
+
+  telemetrySnapshot(): void {
+    const spans = this.telemetry.getSpans().slice(-400);
+    this.bus.app({ kind: 'telemetry', spans: spans.map((s) => ({ ...s, attributes: { ...s.attributes }, events: s.events.map((e) => ({ ...e })) })) as never });
+  }
+
+  async setSatellite(state: 'online' | 'offline'): Promise<void> {
+    this.satelliteOnline = state === 'online';
+    await this.ground?.uplink(this.world.tick, this.world.forecast(), state);
   }
 
   /**
@@ -90,7 +161,9 @@ export class Station {
     const sections = { station_status: stationStatusSection(snap), watch_phase: watchPhaseSection(snap.phase) };
     const key = JSON.stringify(sections);
     for (const m of this.crew()) {
-      m.syncTools((name) => toolAvailable(name, this.world, m.id, this.flags));
+      const gsNames = new Set(this.ground?.tools.map((t) => t.name) ?? []);
+      const comms = this.world.module('comms').status !== 'offline';
+      m.syncTools((name) => (gsNames.has(name) ? comms : toolAvailable(name, this.world, m.id, this.flags)));
       if (this.lastSections.get(m.id) !== key) {
         if (this.lastSections.has(m.id)) m.patchSections(sections);
         this.lastSections.set(m.id, key);
@@ -129,7 +202,7 @@ export class Station {
   }
 
   info(): ServerInfo {
-    return { mode: this.config.mode, currency: this.config.currency, usdRate: this.config.usdRate, lessons: lessonList() };
+    return { mode: this.config.mode, triageSamples: this.hub.triageSamples, currency: this.config.currency, usdRate: this.config.usdRate, lessons: lessonList() };
   }
 
   hello(): Extract<ServerMsg, { t: 'hello' }> {
@@ -172,6 +245,12 @@ export class Station {
     }
     const token = ++this.lessonToken;
     await this.quiesce();
+    if (script.setup?.groundStation && !this.groundReady) this.groundReady = this.startGroundStation();
+    if (this.groundReady) {
+      await this.groundReady;
+      if (this.satelliteOnline) await this.setSatellite('offline'); // 每课从「卫星未上线」开始
+      await new Promise((r) => setTimeout(r, 50));
+    }
     this.dispatcher.enabled = false;
     this.hub.backend = mode;
     this.hub.setOfflineBrain(undefined);
@@ -179,6 +258,7 @@ export class Station {
     const world = new World({ seed: script.seed, autoSpawn: false, autoHazards: false });
     const savedFlags = { ...this.flags };
     const savedBudget = this.contextBudget;
+    const savedSamples = this.hub.triageSamples;
     this.installWorld(world);
     this.applySetup(script, world);
     this.lesson = { meta: script.meta, mode, status: 'running' };
@@ -194,16 +274,39 @@ export class Station {
         if (mode === 'faux') this.hub.faux.setResponses(step.responses);
         for (const [k, v] of Object.entries(step.policy ?? {})) this.setPolicy(k as PolicyKey, v);
         if (step.before?.repair) this.world.repairNow(step.before.repair);
+        if (step.before?.satellite) {
+          const gs = await this.groundStationReady();
+          const changed = new Promise<void>((resolve) => {
+            const off = this.bus.subscribe((m) => {
+              if (m.t === 'app' && m.ev.kind === 'notice' && m.ev.text.startsWith('地面站工具')) (off(), resolve());
+            });
+            setTimeout(() => (off(), resolve()), 3000);
+          });
+          await this.setSatellite(step.before.satellite);
+          if (gs) await changed; // 等 tools/list_changed 走完一圈
+        }
         if (step.before?.spawn) for (let i = 0; i < step.before.spawn; i++) this.world.spawnNow();
         const t = step.trigger;
         const msg =
-          t.kind === 'situation'
+          t.kind === 'judge' || t.kind === 'triage'
+            ? []
+            : t.kind === 'situation'
             ? situationMessage(this.world.snapshot(), [t.reason])
             : t.kind === 'duty'
               ? worldEventMessage('duty', t.text)
               : t.kind === 'custom'
                 ? t.messages.map((c) => this.customMessage(c))
                 : operatorMessage(t.text, 'prompt');
+        if (t.kind === 'judge' || t.kind === 'triage') {
+          if (t.kind === 'judge') await this.review();
+          else {
+            this.hub.triageSamples = t.samples;
+            const s = this.world.snapshot().signals[0];
+            if (s) await triageSignal(this.hub, this.world, this.bus, s, radioTranscript(s));
+          }
+          cleanup();
+          continue;
+        }
         if (t.kind === 'operator') this.bus.app({ kind: 'operator.echo', target: member.id, text: t.text, mode: 'prompt' });
         if (step.changeBeforeRun === 'spawn') this.world.spawnNow();
         try {
@@ -213,6 +316,7 @@ export class Station {
         }
       }
       if (token !== this.lessonToken) return;
+      this.telemetrySnapshot();
       this.lesson.status = 'done';
       this.bus.app({ kind: 'lesson', lesson: script.meta, mode, status: 'done' });
     } catch (err) {
@@ -222,6 +326,7 @@ export class Station {
     } finally {
       if (script.setup?.policy || script.steps.some((st) => st.policy)) for (const [k, v] of Object.entries(savedFlags)) this.setPolicy(k as PolicyKey, v);
       this.contextBudget = savedBudget;
+      this.hub.triageSamples = savedSamples;
     }
   }
 
@@ -277,6 +382,7 @@ export class Station {
 
   async shutdown(): Promise<void> {
     this.world?.stop();
+    await this.ground?.close().catch(() => {});
     for (const m of this.members.values()) m.abort();
     await this.journal?.close();
   }
@@ -340,12 +446,23 @@ export class Station {
     this.offWorld = world.subscribe(({ tick, events, patch }) => {
       if (Object.keys(patch).length) this.bus.world(tick, patch);
       for (const ev of events) this.bus.app({ kind: 'world.event', ev });
+      if (events.some((e) => e.type === 'shift.ended') && !this.lesson) void this.review().catch(() => {});
       if (events.some((e) => e.type === 'module.damaged' || e.type === 'module.repaired' || e.type.startsWith('flare.'))) this.syncContext();
+      if (this.ground && tick % 10 === 0) {
+        const satellite = !this.lesson && !this.satelliteOnline && tick >= this.satelliteAt ? 'online' : undefined;
+        if (satellite) {
+          this.satelliteOnline = true;
+          this.bus.app({ kind: 'notice', level: 'info', text: '天气卫星上线：地面站开始提供耀斑预报' });
+        }
+        void this.ground.uplink(tick, world.forecast(), satellite).catch(() => {});
+      }
     });
     this.offDispatch = this.dispatcher.attach(world);
     const specs = crewSpecs(this.config);
     this.members.clear();
     this.lastSections.clear();
+    const codemodeStore = {};
+    this.telemetry = new InMemoryTelemetryContext();
     const transformContext = () => viewTrim(() => this.contextBudget, () => this.flags.viewTrim);
     const afterRun = afterRunCompactor({ hub: this.hub, bus: this.bus, enabled: () => this.flags.compaction, budget: () => this.contextBudget });
     for (const id of CREW_ORDER) {
@@ -362,10 +479,13 @@ export class Station {
           crew: (cid) => this.members.get(cid),
           transformContext,
           afterRun,
+          codemodeStore,
+          telemetry: this.telemetry,
           flush: this.journal ? () => this.journal!.flush() : undefined,
         }),
       );
     }
+    if (this.ground?.tools.length) this.members.get('commander')!.addTools(this.ground.tools);
     this.syncContext();
     this.bus.world(world.tick, world.snapshot());
     this.bus.app({ kind: 'crew', crew: this.crewViews() });

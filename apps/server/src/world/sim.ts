@@ -271,6 +271,15 @@ export class World {
     return view;
   }
 
+  /** 分诊台的结论写回快照（不是世界规则的一部分，只是标注） */
+  setTriage(id: string, triage: { severity: string; urgency: number; hoax: number }): void {
+    if (!this.signal(id)) return;
+    this.mutate((next) => {
+      const s = next.signals.find((x) => x.id === id);
+      if (s) s.triage = triage;
+    });
+  }
+
   /** 课程用：立即修好一个舱段 */
   repairNow(id: ModuleId): void {
     this.incidents.delete(id);
@@ -313,6 +322,12 @@ export class World {
       m.alarm = incident ? ALARM_TEXT[incident.kind] : undefined;
       events.push({ type: 'module.damaged', tick: next.tick, module: id, status, alarm: m.alarm });
     });
+  }
+
+  /** 下一次耀斑的计划（预警之前也知道）：只上行给地面站做「预报」 */
+  forecast(): { sectors: SectorId[]; startTick: number } | undefined {
+    const f = this.nextFlare ?? this.state.flares[0];
+    return f ? { sectors: [...f.sectors], startTick: f.startTick } : undefined;
   }
 
   /** 课程 / 测试用：安排一次耀斑，startIn 秒后爆发（预警在爆发前 60 秒；不足 60 秒则立即预警） */

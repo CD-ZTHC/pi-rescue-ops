@@ -237,3 +237,97 @@ test('中止级联：中止指挥官时，正在执行委派的子 Agent 一并�
   assert.equal(station.approvals.list().length, 0, '中止时待审批项被撤销');
   await station.shutdown();
 });
+
+async function runLessonWith(id: string, options: { groundStation?: boolean } = {}) {
+  const { Station } = await import('../runtime/station.ts');
+  const { offlineConfig } = await import('./helpers.ts');
+  const station = new Station(offlineConfig(), { clock: false, journal: false, autoSpawn: false, autoHazards: false, groundStation: options.groundStation });
+  station.flags.triage = false;
+  station.startFreePlay();
+  const msgs: ServerMsg[] = [];
+  station.bus.subscribe((m) => msgs.push(m));
+  const stop = drive(station, 15);
+  try {
+    await station.loadLesson(id, 'faux');
+  } finally {
+    stop();
+  }
+  assert.equal(station.lesson?.status, 'done', `${id} 未完成`);
+  const tools = msgs.flatMap((m) => (m.t === 'agent' && m.ev.type === 'tool_execution_start' ? [m.ev.toolName] : []));
+  assert.deepEqual(tools, getLesson(id)!.expectTools);
+  return { station, msgs };
+}
+
+test('第 8 课：afterToolCall 打码——模型只看到打码版本，原文留在 details', async () => {
+  const { station, msgs } = await runLessonWith('L08');
+  const said = lastText(station);
+  assert.match(said, /船长：\S\*+/);
+  assert.ok(!/船长：[一-鿿]{2,}，/.test(said), '模型看不到完整姓名');
+  const end = msgs.find((m) => m.t === 'agent' && m.ev.type === 'tool_execution_end' && m.ev.toolName === 'ship_registry_lookup');
+  assert.ok(end && end.t === 'agent' && end.ev.type === 'tool_execution_end');
+  const details = end.ev.result.details as { unredacted?: { structuredContent: { captain: string } } };
+  assert.ok(details.unredacted && !details.unredacted.structuredContent.captain.includes('*'));
+  await station.shutdown();
+});
+
+test('第 16 课：run_script 一次查询 10 个信号；嵌套调用经 runToolCall 走指挥官的 hook，并记录在 nestedCalls', async () => {
+  const { station, msgs } = await runLessonWith('L16');
+  const end = msgs.find((m) => m.t === 'agent' && m.ev.type === 'tool_execution_end' && m.ev.toolName === 'run_script');
+  assert.ok(end && end.t === 'agent' && end.ev.type === 'tool_execution_end');
+  const nested = (end.ev.result.details as { nestedCalls: { calls: Array<{ name: string; status: string; id: string }>; complete: boolean } }).nestedCalls;
+  assert.equal(nested.calls.length, 21);
+  assert.equal(nested.complete, true);
+  assert.ok(nested.calls.every((c) => c.status === 'ok'));
+  const hookIds = msgs.flatMap((m) => (m.t === 'app' && m.ev.kind === 'hook' && m.ev.hook === 'beforeToolCall' ? [m.ev.toolCallId] : []));
+  assert.ok(nested.calls.every((c) => hookIds.includes(c.id)), '每个嵌套调用都经过了 beforeToolCall');
+  assert.equal((end.ev.result.structuredContent as { value: { count: number } }).value.count, 10);
+  await station.shutdown();
+});
+
+test('第 17 课：MCP 地面站工具；卫星上线后 tools/list_changed 让指挥官多出一个工具', async () => {
+  const { station } = await runLessonWith('L17', { groundStation: true });
+  const said = lastText(station);
+  assert.match(said, /地面站现在提供：ship_registry_lookup、station_manual_search。/);
+  assert.match(said, /新工具 space_weather_forecast 到了/);
+  await station.shutdown();
+});
+
+test('第 18 课：自定义分类器；k=1 概率只有 0/1，k=5 出现中间值', async () => {
+  const { station, msgs } = await runLessonWith('L18');
+  const triage = msgs.flatMap((m) => (m.t === 'app' && m.ev.kind === 'triage' ? [m.ev] : []));
+  assert.deepEqual(triage.map((t) => t.samples), [1, 5]);
+  const probs = (t: (typeof triage)[number]) => [...Object.values(t.result.severity), t.result.hoax];
+  assert.ok(probs(triage[0]).every((p) => p === 0 || p === 1));
+  assert.ok(probs(triage[1]).every((p) => Math.abs(p * 5 - Math.round(p * 5)) < 1e-9));
+  assert.ok(probs(triage[1]).some((p) => p > 0 && p < 1), 'k=5 时样本有分歧');
+  assert.ok(station.world.signal('S-01')!.triage, '分诊结论写回地图');
+  await station.shutdown();
+});
+
+test('第 20 课：agentLoop 的事件流不等消费者；Agent 在 message_end 处形成屏障', async () => {
+  const { station, msgs } = await runLessonWith('L20');
+  const review = msgs.flatMap((m) => (m.t === 'app' && m.ev.kind === 'review' ? [m.ev] : []))[0];
+  assert.ok(review);
+  assert.equal(review.consumerCaughtUp, false, '低层循环：工具执行时消费者还没处理完 message_end');
+  assert.equal(review.agentBarrier, true, 'Agent：工具一定在监听器处理完之后执行');
+  assert.match(review.grade, /^[A-D]$/);
+  assert.ok(review.events.includes('tool_execution_end'));
+  await station.shutdown();
+});
+
+test('第 21 课：request.meta 的耗时字段；span 树 rescue.run → rescue.request / rescue.tool', async () => {
+  const { station, msgs } = await runLessonWith('L21');
+  const meta = msgs.flatMap((m) => (m.t === 'app' && m.ev.kind === 'request.meta' ? [m.ev] : []));
+  assert.equal(meta.length, 2);
+  for (const m of meta) {
+    assert.equal(typeof m.durationMs, 'number');
+    assert.equal(typeof m.ttftMs, 'number');
+    assert.ok(m.usage && m.usage.totalTokens > 0);
+  }
+  const spans = msgs.flatMap((m) => (m.t === 'app' && m.ev.kind === 'telemetry' ? [m.ev.spans] : [])).at(-1)!;
+  const run = spans.find((s) => s.name === 'rescue.run');
+  assert.ok(run);
+  const children = spans.filter((s) => s.parentId === run.id).map((s) => s.name);
+  assert.ok(children.includes('rescue.request') && children.includes('rescue.tool'), children.join(','));
+  await station.shutdown();
+});

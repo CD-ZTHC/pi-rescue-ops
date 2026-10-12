@@ -45,6 +45,10 @@ interface UiSlice {
   contextAgent: CrewId;
   benchOpen: boolean;
   policyOpen: boolean;
+  spansOpen: boolean;
+  spans?: Extract<AppEvent, { kind: 'telemetry' }>['spans'];
+  /** Inspector 里点开的请求（第 21 课：耗时构成与原始 chunk） */
+  requestDetail?: import('./runs.ts').RequestView & { agentId: CrewId };
 }
 
 export const useUi = create<UiSlice>(() => ({
@@ -64,6 +68,7 @@ export const useUi = create<UiSlice>(() => ({
   contextAgent: 'commander',
   benchOpen: false,
   policyOpen: false,
+  spansOpen: false,
 }));
 
 /** 服务端墙钟与本地时钟的偏差：取观测到的最小值（网络延迟只会让差值变大） */
@@ -184,6 +189,9 @@ function applyUi(ev: AppEvent): void {
       return;
     case 'queue':
       useUi.setState((s) => ({ queues: { ...s.queues, [ev.agentId]: ev } }));
+      return;
+    case 'telemetry':
+      useUi.setState({ spans: ev.spans });
       return;
     case 'context.meter':
       useUi.setState((s) => ({ meters: { ...s.meters, [ev.agentId]: ev } }));

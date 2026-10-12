@@ -53,6 +53,12 @@ const SUMMARIES: Record<number, string> = {
   14: '三层上下文管理：transformContext 每次请求前做视图裁剪（不改原始消息，永远保留 system 消息，旧图片折叠，超预算时从完整的边界开始裁）；运行间隙（agent 空闲、队列为空）由书记员把最老的一段写成摘要，替换为一条 compaction 消息——这会直接修改 agent.state.messages；遇到上下文溢出时强制压缩再 continue()。本课把预算压到 1800 token，五个信号之后就会看到压缩。',
   15: '子 Agent 就是一个工具：delegate 的 execute 里 await child.prompt()，返回专家用 report_back 交付的结构化报告。子 Agent 的事件通过 onUpdate 冒泡成父工具的 tool_execution_update，Inspector 据此把 delegate 工具条展开成嵌套子泳道。指挥官在一个回复里并行委派三名专家；父工具被中止时，signal 级联中止子 Agent；子 Agent 正忙时，新任务以 steer 插进它当前的运行。',
   22: '图片是 ImageContent。model.input 决定 pi-ai 如何处理：glm-5.3 只收文本，图片被 transformMessages 替换为占位文本；glm-5.3-flash 能看图，工具结果里的图片被拆成紧随其后的一条 user 消息。指挥官看不见图，有两种办法：委派给能看图的专家（第二步），或在 prepareRequest 里检测到未分析的图片时临时换成 flash 发这一次请求（第三步，「换眼睛」）。图片也占上下文：每个船员只保留最近 2 张。',
+  8: 'afterToolCall 在工具执行之后、tool_execution_end 之前运行，可以改写 content / details / structuredContent / isError / terminate。地面站的船舶登记里有船长姓名、电话、证件号：redact 策略把它们打码，模型只看到打码后的版本，原文留在 details.unredacted 供界面切换查看。注意 1.1 的合并语义：只返回 content 会让 structuredContent 被丢弃，所以两者必须一起返回。',
+  16: 'run_script 把只读工具注入 pi-codemode 的 QuickJS 沙箱（WebAssembly，每次约 20 ms），模型一次写段 JavaScript 就能遍历 10 个信号、比较燃料与抵达时间。嵌套调用不进入模型上下文，只有 text() 与返回值回来。关键：沙箱工具经 runToolCall() 执行并带上指挥官自己的 hook，所以单步、过期检查、审计照样生效；核心不填 nestedCalls，这里按 NestedToolCallRecord 自己收集。',
+  17: '地面站是一个独立的 stdio MCP server（官方 SDK 实现）。救援站用 pi-mcp 的 StdioTransport 启动它，listTools() 后把每个工具包成 AgentTool：内容用 toLlmContent 转换，isError 原样透传。天气卫星上线时地面站注册新工具并发出 tools/list_changed，救援站重新拉取工具表，交给指挥官的动态工具机制——下一次请求前 pi 写入工具差异。',
+  18: '网关不返回 logprobs，pi-ai 内置的分类器用不了。这里在 GLM provider 上注册了一个模型类型为 classifier 的模型和自定义 ProviderClassifier：把问题编译成工具 schema，用 flash 并行采样 k 次，以经验分布作为概率。k=1 时概率只能是 0 或 1；k=5 时出现 0.2、0.6 这样的中间值。界面上的概率条明确标注「采样估计」。classify() 从不 reject：失败体现在 stopReason。',
+  20: 'agentLoop() 是不带状态的低层循环：给它消息、上下文和配置，它返回事件流。这个事件流是「观察性」的——消费者处理得再慢，循环也不等，工具可能在消费者看到 message_end 之前就执行了。Agent 则把 awaited 的 subscribe 监听器纳入运行：message_end 处形成屏障，beforeToolCall 看到的状态里已经包含发起调用的那条 assistant 消息。评审结果里会显示两者的对照。',
+  21: '读懂一次请求的耗时：排队等配额（灰色）→ TTFT（白色竖线，onProviderStreamEvent 收到首个 provider 事件的时刻）→ 流式输出 → durationMs（AssistantMessage 自带）→ 工具执行（tool_execution_end.durationMs）。悬停请求条可以看到 token、缓存命中与费用；真实模型下还能展开前 20 个原始 chunk。底栏「Span 树」展示 pi-telemetry 收集的 rescue.run → rescue.request / rescue.tool。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
@@ -67,11 +73,15 @@ export interface LessonStep {
     | { kind: 'situation'; reason: string }
     | { kind: 'operator'; text: string }
     | { kind: 'duty'; text: string }
-    | { kind: 'custom'; messages: Array<{ role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }> };
+    | { kind: 'custom'; messages: Array<{ role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }> }
+    /** 不驱动船员，直接运行班末评审（agentLoop） */
+    | { kind: 'judge' }
+    /** 不驱动船员，用分诊台给第一个信号分类，采样 k 次 */
+    | { kind: 'triage'; samples: number };
   /** 本步的策略开关（与 setup.policy 一样，课程结束后恢复） */
   policy?: Partial<Record<PolicyKey, boolean>>;
   /** 本步开始前世界先发生的事 */
-  before?: { repair?: ModuleId; spawn?: number };
+  before?: { repair?: ModuleId; spawn?: number; satellite?: 'online' | 'offline' };
   /** faux 模式下本步要排入的响应 */
   responses: FauxResponseStep[];
   /** 课程自动驾驶：依次代替主管处理审批（主管抢先点了就以主管为准） */
@@ -93,6 +103,8 @@ export interface LessonScript {
     flareOnFirstSignal?: number;
     /** 额外生成 n 个「真实且危急」的信号，并预先研判（线索里出现「生命维持遥测断续」） */
     criticalSignals?: number;
+    /** 本课需要 MCP 地面站 */
+    groundStation?: boolean;
     /** 生成一个真实信号并直接接回幸存者，建立伤员组（有待评估成员） */
     patient?: boolean;
     /** 上下文预算（估算 token），课程结束后恢复 */
@@ -644,7 +656,140 @@ const lesson22: LessonScript = {
   ],
 };
 
-const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14, lesson15, lesson22].map((l) => [l.meta.id, l]));
+const lesson8: LessonScript = {
+  meta: meta(8, true, '关掉「个人信息打码」：船长姓名、电话、证件号原样进入模型上下文', 'redact'),
+  seed: 1008,
+  spawnSignals: 1,
+  setup: { groundStation: true },
+  expectTools: ['ship_registry_lookup', 'stand_by'],
+  steps: [
+    {
+      label: '查询船舶登记：afterToolCall 把个人信息打码后再交给模型',
+      thinkingLevel: 'low',
+      trigger: { kind: 'custom', messages: [{ role: 'radio', text: '这里是客船「曙光号」，主引擎失效，舱内 8 人，请求救援。' }] },
+      responses: [
+        toolUse([fauxText('先查「曙光号」的登记。'), fauxToolCall('ship_registry_lookup', { name: '曙光号' })]),
+        (context) =>
+          toolUse([
+            fauxText(`登记信息（我看到的版本）：${lastToolText(context.messages)}`),
+            fauxToolCall('stand_by', { reason: '已核对船舶登记' }),
+          ]),
+      ],
+    },
+  ],
+};
+
+const lesson16: LessonScript = {
+  meta: meta(16, true, '让沙箱工具直接调用 tool.execute()：嵌套调用绕过 beforeToolCall，单步与审计都管不到它们'),
+  seed: 1016,
+  spawnSignals: 10,
+  expectTools: ['run_script', 'stand_by'],
+  steps: [
+    {
+      label: '一次脚本查询 10 个信号：燃料与抵达时间',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '信号很多' },
+      responses: [
+        toolUse([
+          fauxText('信号太多，写段脚本一次算完。'),
+          fauxToolCall('run_script', {
+            code: [
+              'const signals = await tools.list_signals({});',
+              'const rows = [];',
+              'for (const s of signals) {',
+              '  const fuel = await tools.fuel_estimate({ signalId: s.id });',
+              '  const eta = await tools.drone_eta({ signalId: s.id });',
+              '  rows.push({ id: s.id, fuel: fuel.fuel, eta: eta.eta, inTime: eta.inTime });',
+              '}',
+              'rows.sort((a, b) => a.fuel - b.fuel);',
+              'store("plan", rows.slice(0, 3).map((r) => r.id));',
+              'text(rows.map((r) => `${r.id} 燃料${r.fuel} ${r.eta}s${r.inTime ? "" : "（来不及）"}`).join("\\n"));',
+              'return { cheapest: rows[0].id, count: rows.length };',
+            ].join('\n'),
+          }),
+        ]),
+        (context) => toolUse([fauxText(lastToolText(context.messages).split('\n').at(-1) ?? ''), fauxToolCall('stand_by', { reason: '已排出优先级' })]),
+      ],
+    },
+  ],
+};
+
+const lesson17: LessonScript = {
+  meta: meta(17, true, '地面站子进程崩溃：transport 关闭，地面站工具全部从工具表移除，频道提示「地面站失联」'),
+  seed: 1017,
+  spawnSignals: 1,
+  setup: { groundStation: true },
+  expectTools: ['station_manual_search', 'stand_by', 'space_weather_forecast', 'stand_by'],
+  steps: [
+    {
+      label: '地面站（MCP）工具：查站务手册',
+      thinkingLevel: 'low',
+      policy: { delegation: true },
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        (context) =>
+          toolUse([
+            fauxText(`地面站现在提供：${toolList(context.messages).filter((t) => ['ship_registry_lookup', 'station_manual_search', 'space_weather_forecast'].includes(t)).join('、')}。查一下手册。`),
+            fauxToolCall('station_manual_search', { query: '诱饵' }),
+          ]),
+        toolUse([fauxText('手册说明了诱饵特征。'), fauxToolCall('stand_by', { reason: '已查阅手册' })]),
+      ],
+    },
+    {
+      label: '天气卫星上线：tools/list_changed → 指挥官的工具表新增预报工具',
+      thinkingLevel: 'low',
+      before: { satellite: 'online' },
+      trigger: { kind: 'situation', reason: '天气卫星上线' },
+      responses: [
+        (context) =>
+          toolUse([
+            fauxText(toolList(context.messages).includes('space_weather_forecast') ? '新工具 space_weather_forecast 到了，查预报。' : '没看到预报工具。'),
+            fauxToolCall('space_weather_forecast', {}),
+          ]),
+        (context) => toolUse([fauxText(lastToolText(context.messages)), fauxToolCall('stand_by', { reason: '已掌握耀斑预报' })]),
+      ],
+    },
+  ],
+};
+
+const lesson18: LessonScript = {
+  meta: meta(18, true, '把采样数 k 调成 1：每个概率都只能是 0 或 1，看不出把握有多大'),
+  seed: 1018,
+  spawnSignals: 1,
+  expectTools: [],
+  steps: [
+    { label: '分诊：采样 k=1', trigger: { kind: 'triage', samples: 1 }, responses: [] },
+    { label: '分诊：采样 k=5', trigger: { kind: 'triage', samples: 5 }, responses: [] },
+  ],
+};
+
+const lesson20: LessonScript = {
+  meta: meta(20, true, '把评审改用 Agent 实现：工具一定在监听器处理完 message_end 之后才执行（屏障）'),
+  seed: 1020,
+  spawnSignals: 0,
+  expectTools: [],
+  steps: [{ label: '班末评审：agentLoop 低层循环 + Agent 对照组', trigger: { kind: 'judge' }, responses: [] }],
+};
+
+const lesson21: LessonScript = {
+  meta: meta(21, true, '不传 onProviderStreamEvent：TTFT 只能用首个流式增量近似（faux 下本来就是这样）'),
+  seed: 1021,
+  spawnSignals: 1,
+  expectTools: ['inspect_signal', 'stand_by'],
+  steps: [
+    {
+      label: '一次运行的耗时构成：排队 → TTFT → 流式 → 工具 → 下一次请求',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        toolUse([fauxThinking('先研判。'), fauxText('研判 S-01。'), fauxToolCall('inspect_signal', { signalId: 'S-01' })]),
+        toolUse([fauxText('记录在案。'), fauxToolCall('stand_by', { reason: '观察耗时构成' })]),
+      ],
+    },
+  ],
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson8, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14, lesson15, lesson16, lesson17, lesson18, lesson20, lesson21, lesson22].map((l) => [l.meta.id, l]));
 
 function meta(index: number, available: boolean, toggle: string, toggleKey?: PolicyKey): LessonMeta {
   const row = ROWS[index - 1];

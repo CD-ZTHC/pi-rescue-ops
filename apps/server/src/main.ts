@@ -5,7 +5,7 @@ import { Station } from './runtime/station.ts';
 import { attachWebSocket } from './runtime/ws.ts';
 
 const config = loadConfig();
-const station = new Station(config);
+const station = new Station(config, { groundStation: true });
 station.startFreePlay();
 
 const server = createServer((req, res) => {

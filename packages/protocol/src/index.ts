@@ -48,6 +48,7 @@ export const POLICY_FLAGS = {
   viewTrim: { label: '视图裁剪', hook: 'transformContext', default: true },
   compaction: { label: '运行间隙压缩', hook: 'agent_end', default: true },
   delegation: { label: '指挥官委派专家（关闭则调度器直接派活）', hook: 'tools', default: true },
+  triage: { label: '分诊台（新信号先分类再唤醒）', hook: 'classifier', default: true },
 } as const;
 export type PolicyKey = keyof typeof POLICY_FLAGS;
 export type PolicyFlags = Record<PolicyKey, boolean>;
@@ -114,11 +115,15 @@ export type HookName =
   | 'prepareNextTurn'
   | 'transformContext';
 
+/** 分诊结果（§5.9）：概率来自 k 次采样的经验分布，不是 logprob */
 export interface ClassifierView {
-  severity?: Record<string, number>;
-  urgency?: number[];
-  hoax?: number;
-  confidence?: number;
+  severity: Record<string, number>;
+  severityChoice: string;
+  urgency: number;
+  urgencyConfidence: number;
+  hoax: number;
+  error?: string;
+  cost?: number;
 }
 
 export type AppEvent =
@@ -126,7 +131,7 @@ export type AppEvent =
   | { kind: 'approval.requested'; approvalId: string; agentId: CrewId; toolCallId: string; tool: string; args: unknown; risk: string; expiresAt: number }
   | { kind: 'approval.resolved'; approvalId: string; decision: 'approve' | 'deny' | 'timeout' }
   | { kind: 'step.paused'; agentId: CrewId; at: HookName; detail: unknown }
-  | { kind: 'triage'; signalId: string; result: ClassifierView; samples: number }
+  | { kind: 'triage'; signalId: string; result: ClassifierView; samples: number; durationMs: number; model: string }
   | { kind: 'compaction'; agentId: CrewId; beforeTokens: number; afterTokens: number; summary: string }
   | {
       kind: 'request.meta';
@@ -148,9 +153,13 @@ export type AppEvent =
       stopReason?: string;
       usage?: { input: number; output: number; reasoning?: number; cacheRead: number; totalTokens: number; cost: number };
       images?: number;
+      /** provider 原始事件（前 20 个，截断），只有真实模型会有 */
+      rawChunks?: string[];
     }
   | { kind: 'queue'; agentId: CrewId; steer: number; followUp: number; preview: string[]; steeringMode: 'all' | 'one-at-a-time'; followUpMode: 'all' | 'one-at-a-time' }
   | { kind: 'policy'; flags: PolicyFlags; stepping: boolean }
+  | { kind: 'review'; grade: string; strengths: string[]; improvements: string[]; events: string[]; consumerCaughtUp: boolean; agentBarrier?: boolean; durationMs: number }
+  | { kind: 'telemetry'; spans: Array<{ id: number; parentId: number | null; name: string; attributes: Record<string, unknown>; events: Array<{ name: string; attributes?: Record<string, unknown> }>; status: unknown; settled: boolean }> }
   | { kind: 'context.meter'; agentId: CrewId; estTokens: number; viewTokens: number; budget: number; messages: number }
   | { kind: 'step.resumed'; agentId: CrewId }
   | { kind: 'bench.result'; agentId: CrewId; tool: string; args: unknown; isError: boolean; durationMs?: number; content: unknown[]; structured?: unknown; blocked?: boolean }
@@ -178,6 +187,7 @@ export interface LessonMeta {
 
 export interface ServerInfo {
   mode: 'live' | 'offline';
+  triageSamples: number;
   currency: 'USD' | 'CNY';
   usdRate: number;
   lessons: LessonMeta[];
@@ -221,6 +231,9 @@ export type ClientMsg =
   | { t: 'lesson.load'; lessonId: string; mode: 'faux' | 'live' }
   | { t: 'lesson.exit' }
   | { t: 'policy.set'; key: PolicyKey; value: boolean }
+  | { t: 'review.request' }
+  | { t: 'telemetry.request' }
+  | { t: 'triage.samples'; k: number }
   | { t: 'queue.mode'; target: CrewId | 'all'; steering: 'all' | 'one-at-a-time'; followUp: 'all' | 'one-at-a-time' }
   | { t: 'replay.load'; file: string };
 

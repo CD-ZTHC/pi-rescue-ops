@@ -4,7 +4,7 @@ import { POLICY_FLAGS, type PolicyKey } from '@rescue/protocol';
 import { send } from '../net/client.ts';
 import { useUi } from '../store/index.ts';
 
-const GROUPS = ['beforeToolCall', 'afterToolCall', 'finishTurn', 'prepareRequest', 'transformContext', 'agent_end', 'tools'];
+const GROUPS = ['beforeToolCall', 'afterToolCall', 'finishTurn', 'prepareRequest', 'transformContext', 'agent_end', 'tools', 'classifier'];
 
 export function PolicyPanel() {
   const { policyOpen, policy } = useUi();

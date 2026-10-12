@@ -17,11 +17,11 @@ import type { World } from '../world/sim.ts';
 
 export interface DispatcherDeps {
   crew: (id: CrewId) => CrewMember | undefined;
-  /** 判断事件是否紧急（M6 由分诊台给出） */
-  isUrgent?: (ev: WorldEvent) => boolean;
+  /** 分诊台（§3.3）：新信号先分类，再唤醒指挥官；返回是否紧急。不配置则一律普通 */
+  triage?: (signal: Extract<WorldEvent, { type: 'signal.spawned' }>['signal'], radio: string) => Promise<boolean> | undefined;
 }
 
-export type DispatchAction = 'prompt' | 'steer' | 'followUp' | 'append' | 'ignored';
+export type DispatchAction = 'prompt' | 'steer' | 'followUp' | 'append' | 'ignored' | 'triage';
 
 export interface DispatchRecord {
   event: WorldEvent['type'];
@@ -84,9 +84,19 @@ export class Dispatcher {
     switch (ev.type) {
       case 'signal.spawned': {
         const s = ev.signal;
-        const msg = situationMessage(world.snapshot(), [`新信号 ${s.id}（${s.sector} 区${SIGNAL_KIND_NAMES[s.kind]}）`]);
-        const radio = radioMessage(s.id, radioTranscript(s));
-        return [['commander', commander.deliver([radio, msg], this.deps.isUrgent?.(ev) ? 'steer' : 'followUp')]];
+        const transcript = radioTranscript(s);
+        const wake = (urgent: boolean) => {
+          const msg = situationMessage(world.snapshot(), [`新信号 ${s.id}（${s.sector} 区${SIGNAL_KIND_NAMES[s.kind]}）${urgent ? '，分诊：紧急' : ''}`]);
+          return commander.deliver([radioMessage(s.id, transcript), msg], urgent ? 'steer' : 'followUp');
+        };
+        const pending = this.deps.triage?.(s, transcript);
+        if (!pending) return [['commander', wake(false)]];
+        // 分诊需要几秒：分类结束后再唤醒（分类失败也照常唤醒）
+        void pending.then(
+          (urgent) => this.record(ev, 'commander', wake(urgent)),
+          () => this.record(ev, 'commander', wake(false)),
+        );
+        return [['commander', 'triage']];
       }
       case 'flare.warning': {
         const msg = situationMessage(world.snapshot(), [`耀斑预警：${ev.sectors.join('、')} 区将在 ${ev.startTick - ev.tick} 秒后爆发`]);

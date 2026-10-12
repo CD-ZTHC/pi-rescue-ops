@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { zh } from '../i18n/zh.ts';
 import { useUi, useWorld } from '../store/index.ts';
+import { Bar } from '../comms/Extras.tsx';
 
 export function SignalCard() {
   const selected = useUi((s) => s.selectedSignal);
@@ -57,6 +58,14 @@ export function SignalCard() {
             <dt className="text-slate-500">剩余</dt>
             <dd className="num">{signal.status === 'active' ? `${Math.max(0, signal.expiresTick - tick)} 秒` : '—'}</dd>
           </dl>
+          {signal.triage && (
+            <div className="mt-2 space-y-1 border-t border-slate-700/60 pt-2">
+              <div className="text-slate-500">
+                分诊 <span className="text-pink-300">（采样估计）</span>：{{ minor: '轻微', serious: '严重', critical: '危急' }[signal.triage.severity] ?? signal.triage.severity} · 紧急度 {signal.triage.urgency}
+              </div>
+              <Bar label="恶作剧" value={signal.triage.hoax} color="#94a3b8" />
+            </div>
+          )}
           <div className="mt-2 border-t border-slate-700/60 pt-2">
             <div className="mb-1 text-slate-500">研判线索</div>
             {signal.clues.length ? (

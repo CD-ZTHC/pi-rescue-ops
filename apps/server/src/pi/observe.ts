@@ -87,5 +87,6 @@ function emitRequestMeta(
       cost: message.usage.cost.total,
     },
     images: timing?.images,
+    rawChunks: timing?.raw.length ? [...timing.raw] : undefined,
   });
 }

@@ -7,7 +7,10 @@ export function offlineConfig(overrides: Partial<Config> = {}): Config {
 }
 
 export function testStation(overrides: Partial<Config> = {}, autoSpawn = false): Station {
-  return new Station(offlineConfig(overrides), { clock: false, journal: false, autoSpawn, autoHazards: false });
+  const station = new Station(offlineConfig(overrides), { clock: false, journal: false, autoSpawn, autoHazards: false });
+  // 分诊是异步的；大多数测试关心同步的唤醒路径，需要分诊的测试自行打开
+  station.flags.triage = false;
+  return station;
 }
 
 export function until(cond: () => boolean, timeoutMs = 5_000): Promise<void> {

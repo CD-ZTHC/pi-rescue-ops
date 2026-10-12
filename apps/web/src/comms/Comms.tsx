@@ -9,6 +9,7 @@ import { send } from '../net/client.ts';
 import { commsModel, useModels, useUi } from '../store/index.ts';
 import type { CommsEntry } from '../store/comms.ts';
 import { ApprovalCard } from './ApprovalCard.tsx';
+import { ReviewCard, TriageCard } from './Extras.tsx';
 import { ToolCard } from './ToolCard.tsx';
 import { captureMap } from '../scene/StarMap.tsx';
 
@@ -73,6 +74,8 @@ const Entry = memo(function Entry({ entry }: { entry: CommsEntry; rev: number })
       )}
       {entry.kind === 'tool' && <ToolCard e={entry} focused={focus === entry.toolCallId} />}
       {entry.kind === 'approval' && <ApprovalCard e={entry} />}
+      {entry.kind === 'triage' && <TriageCard e={entry} />}
+      {entry.kind === 'review' && <ReviewCard e={entry} />}
       {entry.kind === 'radio' && (
         <div className="rounded-md border border-dashed border-orange-400/40 bg-orange-500/5 px-2.5 py-1.5 text-[12px] text-orange-100">
           📻 <span className="num text-orange-300">{entry.signalId}</span> 无线电：<span className="italic">{entry.text}</span>

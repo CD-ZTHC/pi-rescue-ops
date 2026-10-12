@@ -4,7 +4,22 @@ import type { Config } from '../config.ts';
 import type { CrewSpec } from './crew.ts';
 import { commanderTools } from './tools/commander.ts';
 import { delegateTool } from './tools/delegate.ts';
-import { compareFramesTool } from './tools/navigator.ts';
+import { compareFramesTool, inspectSignalTool } from './tools/navigator.ts';
+import { runScriptTool } from './tools/codemode.ts';
+import { droneEtaTool, fuelEstimateTool, listSignalsTool, sectorHazardTool } from './tools/readonly.ts';
+import type { CrewDeps } from './crew.ts';
+
+/** run_script 沙箱里可用的只读工具（§5.8） */
+function scriptTools(deps: CrewDeps) {
+  const d = { world: deps.world };
+  const tools = [listSignalsTool(d), inspectSignalTool(d), sectorHazardTool(d), fuelEstimateTool(d), droneEtaTool(d)];
+  return runScriptTool({
+    tools,
+    hooks: () => deps.self!().hooks,
+    context: () => ({ messages: deps.self!().agent.state.messages, tools }),
+    store: deps.codemodeStore ?? {},
+  });
+}
 import { engineerTools } from './tools/engineer.ts';
 import { medicTools } from './tools/medic.ts';
 import { navigatorTools } from './tools/navigator.ts';
@@ -34,10 +49,11 @@ export function commanderSpec(config: Config): CrewSpec {
       'plot_course：比较直飞 / 绕行的耗时、燃料与风险。耀斑区内飞行燃料翻倍、无人机会受损。',
       'dispatch_drone：派在港无人机救援，返回的是回执；救援结果会以【站务】告知。',
       'allocate_fuel：为重要信号预留燃料。end_watch：提前交班。',
+      'run_script：要一次查看很多信号、比较燃料与抵达时间时，写一段脚本组合只读查询，比逐个调用省事。',
       'stand_by：本轮无需行动（或已安排好）时调用并说明理由。每次运行都应以行动或 stand_by 结束。',
     ].join('\n'),
     // 完整工具表：scan_sector 只在关闭委派时出现（M2 的做法），delegate 只在开启委派时出现（见 toolAvailable）
-    tools: (deps) => [...commanderTools({ world: deps.world }), compareFramesTool({ world: deps.world }), delegateTool((id) => deps.crew?.(id))],
+    tools: (deps) => [...commanderTools({ world: deps.world }), compareFramesTool({ world: deps.world }), delegateTool((id) => deps.crew?.(id)), scriptTools(deps)],
   };
 }
 

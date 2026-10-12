@@ -6,8 +6,10 @@ import {
   createProvider,
   envApiKeyAuth,
   fauxProvider,
+  normalizeContext,
   type Api,
   type AssistantMessage,
+  type ClassifierModel,
   type FauxProviderHandle,
   type FauxResponseFactory,
   type Model,
@@ -15,6 +17,7 @@ import {
 } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import type { Config, PriceTable } from '../config.ts';
+import { GLM_CLASSIFY_API, glmToolClassifier } from './classifier-glm.ts';
 
 export const GLM_PROVIDER = 'glm';
 export const FAUX_PROVIDER = 'faux';
@@ -104,6 +107,8 @@ export interface RequestTiming {
   providerEvents: number;
   images: number;
   model: string;
+  /** 前 20 个 provider 原始事件（截断），第 21 课展开查看 */
+  raw: string[];
 }
 
 export interface RequestProbe {
@@ -119,10 +124,17 @@ export function createRequestProbe(): RequestProbe {
     begin(t) {
       timing = t;
     },
-    onProviderStreamEvent() {
+    onProviderStreamEvent(data) {
       if (!timing) return;
       timing.providerEvents += 1;
       timing.firstProviderEventAt ??= Date.now();
+      if (timing.raw.length < 20) {
+        try {
+          timing.raw.push(JSON.stringify(data).slice(0, 300));
+        } catch {
+          /* 不可序列化就跳过：这个回调必须轻量且不抛错 */
+        }
+      }
     },
     current: () => timing,
   };
@@ -148,6 +160,10 @@ export interface ModelHub {
   createScribeStreamFn(): StreamFn;
   /** 注册书记员等一次性调用的离线响应工厂 */
   setAuxBrain(factory: FauxResponseFactory): void;
+  /** 分诊台的分类器模型（模型类型 classifier，§5.9） */
+  triageModel(): ClassifierModel<string>;
+  /** 每次分类的采样数 k */
+  triageSamples: number;
 }
 
 export function createModelHub(config: Config): ModelHub {
@@ -164,8 +180,9 @@ export function createModelHub(config: Config): ModelHub {
         name: 'GLM 网关',
         baseUrl: config.baseUrl,
         auth: { apiKey: envApiKeyAuth('GLM API key', ['GLM_API_KEY', 'STRATEGIC_API_KEY']) },
-        models: ids.map((m) => glmModel(m.id, config.baseUrl, m.vision, m.price)),
+        models: [...ids.map((m) => glmModel(m.id, config.baseUrl, m.vision, m.price)), classifierModel(GLM_PROVIDER, config.baseUrl)],
         api: openAICompletionsApi(),
+        classifiers: { [GLM_CLASSIFY_API]: classifierFor(() => hub.chat(config.specialistModel)) },
       }),
     );
   }
@@ -180,9 +197,39 @@ export function createModelHub(config: Config): ModelHub {
   const auxFaux = fauxProvider({ provider: 'faux-aux', models: [{ id: config.specialistModel, reasoning: true, input: ['text', 'image'] }], tokensPerSecond: config.fauxTokensPerSecond });
   models.setProvider(auxFaux.provider);
   let auxBrain: FauxResponseFactory | undefined;
+  models.setProvider(
+    createProvider({
+      id: 'faux-triage',
+      auth: { apiKey: { name: '离线分诊', resolve: async () => ({ auth: {} }) } },
+      models: [classifierModel('faux-triage', 'faux://triage')],
+      classifiers: { [GLM_CLASSIFY_API]: classifierFor(() => auxFaux.getModel()) },
+    }),
+  );
 
   const semaphore = new Semaphore(config.maxConcurrency);
   let offlineBrain: FauxResponseFactory | undefined;
+
+  // 分诊台：自定义分类器 API，底层用 chat 模型采样
+  function classifierModel(provider: string, baseUrl: string): ClassifierModel<string> {
+    return {
+    type: 'classifier',
+    id: `${config.specialistModel}-triage`,
+    name: `${config.specialistModel} 分诊（工具采样）`,
+    api: GLM_CLASSIFY_API,
+    provider,
+    baseUrl,
+    input: ['text', 'image'],
+    cost: { input: config.prices.flash.input, output: config.prices.flash.output, cacheRead: config.prices.flash.cacheRead, cacheWrite: 0 },
+    contextWindow: 128_000,
+    };
+  }
+  async function completeVia(model: Model<Api>, context: import('@earendil-works/pi-ai').Context, options?: { signal?: AbortSignal }) {
+    const stream = await hub.createScribeStreamFn()(model, normalizeContext(context), { signal: options?.signal });
+    return stream.result();
+  }
+  function classifierFor(chatModel: () => Model<Api>) {
+    return glmToolClassifier({ samples: () => hub.triageSamples, chatModel, complete: completeVia });
+  }
 
   const hub: ModelHub = {
     config,
@@ -202,6 +249,12 @@ export function createModelHub(config: Config): ModelHub {
     },
     setAuxBrain(factory) {
       auxBrain = factory;
+    },
+    triageSamples: 3,
+    triageModel() {
+      const m = models.getModelOfType('classifier', hub.backend === 'live' ? GLM_PROVIDER : 'faux-triage', `${config.specialistModel}-triage`);
+      if (!m) throw new Error('分诊模型未注册');
+      return m;
     },
     scribeModel() {
       return hub.backend === 'live' ? hub.chat(config.specialistModel) : auxFaux.getModel();
@@ -228,6 +281,7 @@ export function createModelHub(config: Config): ModelHub {
           providerEvents: 0,
           images: countImages(context.messages),
           model: model.id,
+          raw: [],
         });
         // 离线自由模式：每个请求排入一个大脑工厂（多名船员并发请求时，按「队列为空才补」会出现竞态）
         if (model.provider === FAUX_PROVIDER && offlineBrain) faux.appendResponses([offlineBrain]);
