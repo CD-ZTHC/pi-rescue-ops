@@ -1,0 +1,17 @@
+{
+  "name": "pi-rescue-ops",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "typecheck": "tsc -p apps/server && tsc -p packages/protocol && tsc -p packages/lessons && tsc -p apps/web",
+    "test": "node --test --test-timeout=30000 'apps/server/src/**/*.test.ts'",
+    "dev:server": "node --env-file-if-exists=.env --watch apps/server/src/main.ts",
+    "dev:web": "npm -w apps/web run dev",
+    "smoke:live": "node --env-file-if-exists=.env apps/server/src/test/smoke-live.ts"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@types/node": "26.6.5"
+  }
+}

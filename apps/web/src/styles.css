@@ -1,0 +1,92 @@
+@import 'tailwindcss';
+
+/* §3.6 视觉语言：深空舰桥 */
+@theme {
+  --color-void: #060b18;
+  --color-glass: rgb(15 23 42 / 0.72);
+  --color-edge: rgb(34 211 238 / 0.22);
+  --color-cyan: #22d3ee;
+  --color-violet: #a78bfa;
+  --color-amber: #fbbf24;
+  --color-emerald: #34d399;
+  --color-pink: #f472b6;
+  --color-ground: #60a5fa;
+  --color-danger: #f43f5e;
+  --color-warn: #f59e0b;
+  --color-ok: #10b981;
+  --color-blocked: #64748b;
+  --font-sans: 'Noto Sans SC', 'HarmonyOS Sans SC', 'PingFang SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-void);
+  color: #e2e8f0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* 背景星尘：两层径向渐变缓慢漂移，模拟视差 */
+.stardust {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1px 1px at 12% 18%, rgb(255 255 255 / 0.35), transparent 60%),
+    radial-gradient(1px 1px at 68% 42%, rgb(255 255 255 / 0.25), transparent 60%),
+    radial-gradient(1.5px 1.5px at 38% 78%, rgb(165 243 252 / 0.3), transparent 60%),
+    radial-gradient(1px 1px at 88% 88%, rgb(255 255 255 / 0.2), transparent 60%),
+    radial-gradient(900px 600px at 20% -10%, rgb(34 211 238 / 0.08), transparent 70%),
+    radial-gradient(800px 500px at 110% 110%, rgb(167 139 250 / 0.07), transparent 70%);
+  background-size: 340px 340px, 420px 420px, 520px 520px, 280px 280px, 100% 100%, 100% 100%;
+  animation: drift 120s linear infinite;
+}
+
+@keyframes drift {
+  to {
+    background-position: 340px 170px, -420px 210px, 260px -520px, 280px 280px, 0 0, 0 0;
+  }
+}
+
+.panel {
+  background: var(--color-glass);
+  border: 1px solid var(--color-edge);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 0 0 1px rgb(2 6 23 / 0.6), 0 12px 40px -12px rgb(0 0 0 / 0.6);
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 被阻断 / 思考：斜纹 */
+.hatch {
+  background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.18) 0 3px, transparent 3px 7px);
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(34 211 238 / 0.25) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stardust {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,47 @@
+[tools]
+node = "26.11"
+
+[tasks.install]
+description = "安装依赖"
+run = "npm install"
+
+[tasks.typecheck]
+description = "全仓类型检查（server / protocol / lessons / web）"
+run = "npm run typecheck"
+
+[tasks.test]
+description = "后端单测（node:test + faux）"
+sources = ["apps/server/src/**/*.ts", "packages/*/src/**/*.ts"]
+run = "npm test"
+
+[tasks."test:web"]
+description = "前端单测（vitest）"
+run = "npm -w apps/web run test"
+
+[tasks.build]
+description = "构建前端"
+sources = ["apps/web/src/**", "packages/protocol/src/**"]
+outputs = ["apps/web/dist/**"]
+run = "npm -w apps/web run build"
+
+[tasks."dev:server"]
+description = "启动后端（读取 .env；无 key 时离线演示）"
+run = "npm run dev:server"
+
+[tasks."dev:web"]
+description = "启动前端 Vite（http://localhost:5173）"
+run = "npm run dev:web"
+
+[tasks.dev]
+depends = ["dev:server", "dev:web"]
+description = "同时启动后端与前端"
+run = "echo '织女-7 已启动'"
+
+[tasks."smoke:live"]
+description = "真实 GLM 网关冒烟（手动，花费 token）"
+run = "npm run smoke:live"
+
+[tasks.ci]
+depends = ["typecheck", "test", "test:web", "build"]
+description = "类型检查 + 全部单测 + 构建"
+run = "echo done"
