@@ -221,3 +221,19 @@ export const offlineBrain: FauxResponseFactory = (context, options) => {
   if (system.includes('领航员')) return navigator(messages);
   return commander(messages, options?.reasoning);
 };
+
+/** 书记员的离线版：从记录里挑出信号编号、结论与出动情况，拼成要点 */
+export const offlineScribe: FauxResponseFactory = (context) => {
+  const text = textOf(context.messages.filter((m) => m.role === 'user').at(-1));
+  const lines = text.split('\n');
+  const signals = [...new Set([...text.matchAll(/S-\d+/g)].map((m) => m[0]))];
+  const dispatched = [...new Set([...text.matchAll(/(D-\d)[^\n]{0,8}?(?:→|前往)\s*(S-\d+)/g)].map((m) => `${m[1]}→${m[2]}`))];
+  const verdicts = lines.filter((l) => /判定|诱饵|可信|可疑|真实/.test(l)).map((l) => l.replace(/^[^：]*：/, '').slice(0, 40)).slice(-2);
+  const points = [
+    `涉及信号：${signals.join('、') || '无'}`,
+    dispatched.length ? `已出动：${dispatched.join('、')}` : '本段没有出动无人机',
+    ...verdicts.map((v) => `结论：${v}`),
+    `共 ${lines.length} 条记录已折叠`,
+  ];
+  return fauxAssistantMessage(points.map((p) => `- ${p}`).join('\n'));
+};

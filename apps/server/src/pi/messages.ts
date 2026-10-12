@@ -50,6 +50,12 @@ export function worldEventMessage(kind: string, text: string, correlationId?: st
   return { role: 'world_event', kind, text, correlationId, timestamp: Date.now() };
 }
 
+export type RadioMessage = Extract<AgentMessage, { role: 'radio' }>;
+
+export function radioMessage(signalId: string, transcript: string): RadioMessage {
+  return { role: 'radio', signalId, transcript, timestamp: Date.now() };
+}
+
 export function operatorMessage(text: string, urgency: OperatorMessage['urgency']): OperatorMessage {
   return { role: 'operator', text, urgency, timestamp: Date.now() };
 }

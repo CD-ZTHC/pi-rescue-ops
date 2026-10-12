@@ -5,10 +5,13 @@ import { ApprovalCenter } from '../pi/hooks/approval.ts';
 import { Stepper } from '../pi/hooks/step-gate.ts';
 import type { Config } from '../config.ts';
 import { createCrewMember, type CrewMember } from '../pi/crew.ts';
-import { operatorMessage, situationMessage, worldEventMessage } from '../pi/messages.ts';
+import { operatorMessage, radioMessage, situationMessage, worldEventMessage } from '../pi/messages.ts';
 import { createModelHub, type ModelHub } from '../pi/models.ts';
-import { offlineBrain } from '../pi/offline-brain.ts';
-import { crewSpecs } from '../pi/roster.ts';
+import { offlineBrain, offlineScribe } from '../pi/offline-brain.ts';
+import { crewSpecs, toolAvailable } from '../pi/roster.ts';
+import { afterRunCompactor } from '../pi/compaction.ts';
+import { viewTrim } from '../pi/context.ts';
+import { stationStatusSection, watchPhaseSection } from '../pi/prompts.ts';
 import { World } from '../world/sim.ts';
 import { Bus } from './bus.ts';
 import { Dispatcher } from './dispatcher.ts';
@@ -48,6 +51,9 @@ export class Station {
   readonly stepper: Stepper;
   readonly approvals: ApprovalCenter;
   lesson: LessonState | null = null;
+  /** 上下文预算（估算 token）：超过后视图裁剪、运行间隙压缩 */
+  contextBudget = 24_000;
+  private lastSections = new Map<CrewId, string>();
   private offWorld?: () => void;
   private offDispatch?: () => void;
   private readonly clock: boolean;
@@ -70,6 +76,25 @@ export class Station {
     this.dispatcher = new Dispatcher({ crew: (id) => this.members.get(id) });
     this.stepper = new Stepper(this.bus, () => this.world);
     this.approvals = new ApprovalCenter(this.bus);
+    this.hub.setAuxBrain(offlineScribe);
+  }
+
+  /**
+   * 舱段 / 班次阶段变化时同步每个船员的上下文（§5.3）：
+   * - 工具：按舱段状态增删（pi 在下一次请求前自动写入工具差异 system 消息）
+   * - 提示词：station_status / watch_phase 两个 section 打补丁，随下一批消息送达
+   */
+  syncContext(): void {
+    const snap = this.world.snapshot();
+    const sections = { station_status: stationStatusSection(snap), watch_phase: watchPhaseSection(snap.phase) };
+    const key = JSON.stringify(sections);
+    for (const m of this.crew()) {
+      m.syncTools((name) => toolAvailable(name, this.world));
+      if (this.lastSections.get(m.id) !== key) {
+        if (this.lastSections.has(m.id)) m.patchSections(sections);
+        this.lastSections.set(m.id, key);
+      }
+    }
   }
 
   setPolicy(key: PolicyKey, value: boolean): void {
@@ -147,12 +172,13 @@ export class Station {
     this.hub.setOfflineBrain(undefined);
     this.hub.faux.setResponses([]);
     const world = new World({ seed: script.seed, autoSpawn: false, autoHazards: false });
+    const savedFlags = { ...this.flags };
+    const savedBudget = this.contextBudget;
     this.installWorld(world);
     this.applySetup(script, world);
     this.lesson = { meta: script.meta, mode, status: 'running' };
     this.bus.app({ kind: 'lesson', lesson: script.meta, mode, status: 'running' });
 
-    const savedFlags = { ...this.flags };
     try {
       for (const step of script.steps) {
         if (token !== this.lessonToken) return;
@@ -161,13 +187,17 @@ export class Station {
         if (step.thinkingLevel) member.agent.state.thinkingLevel = step.thinkingLevel;
         this.bus.app({ kind: 'crew', crew: [member.view()] });
         if (mode === 'faux') this.hub.faux.setResponses(step.responses);
+        if (step.before?.repair) this.world.repairNow(step.before.repair);
+        if (step.before?.spawn) for (let i = 0; i < step.before.spawn; i++) this.world.spawnNow();
         const t = step.trigger;
         const msg =
           t.kind === 'situation'
             ? situationMessage(this.world.snapshot(), [t.reason])
             : t.kind === 'duty'
               ? worldEventMessage('duty', t.text)
-              : operatorMessage(t.text, 'prompt');
+              : t.kind === 'custom'
+                ? t.messages.map((c) => this.customMessage(c))
+                : operatorMessage(t.text, 'prompt');
         if (t.kind === 'operator') this.bus.app({ kind: 'operator.echo', target: member.id, text: t.text, mode: 'prompt' });
         if (step.changeBeforeRun === 'spawn') this.world.spawnNow();
         try {
@@ -185,6 +215,21 @@ export class Station {
       this.bus.app({ kind: 'lesson', lesson: script.meta, mode, status: 'error', note: String(err) });
     } finally {
       if (script.setup?.policy) for (const [k, v] of Object.entries(savedFlags)) this.setPolicy(k as PolicyKey, v);
+      this.contextBudget = savedBudget;
+    }
+  }
+
+  private customMessage(c: { role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }) {
+    const first = this.world.snapshot().signals[0];
+    switch (c.role) {
+      case 'radio':
+        return radioMessage(first?.id ?? 'S-01', c.text);
+      case 'world_event':
+        return worldEventMessage('lesson', c.text);
+      case 'ui_note':
+        return { role: 'ui_note' as const, text: c.text, timestamp: Date.now() };
+      default:
+        return situationMessage(this.world.snapshot(), [c.text]);
     }
   }
 
@@ -256,6 +301,8 @@ export class Station {
       for (const s of world.snapshot().signals) if (!world.signal(s.id)!.clues.length) world.retire(s.id);
     }
     for (const [k, v] of Object.entries(setup.policy ?? {})) this.setPolicy(k as PolicyKey, v);
+    if (setup.contextBudget) this.contextBudget = setup.contextBudget;
+    this.syncContext();
   }
 
   private async quiesce(): Promise<void> {
@@ -276,10 +323,14 @@ export class Station {
     this.offWorld = world.subscribe(({ tick, events, patch }) => {
       if (Object.keys(patch).length) this.bus.world(tick, patch);
       for (const ev of events) this.bus.app({ kind: 'world.event', ev });
+      if (events.some((e) => e.type === 'module.damaged' || e.type === 'module.repaired' || e.type.startsWith('flare.'))) this.syncContext();
     });
     this.offDispatch = this.dispatcher.attach(world);
     const specs = crewSpecs(this.config);
     this.members.clear();
+    this.lastSections.clear();
+    const transformContext = () => viewTrim(() => this.contextBudget, () => this.flags.viewTrim);
+    const afterRun = afterRunCompactor({ hub: this.hub, bus: this.bus, enabled: () => this.flags.compaction, budget: () => this.contextBudget });
     for (const id of CREW_ORDER) {
       this.members.set(
         id,
@@ -292,10 +343,13 @@ export class Station {
           stepper: this.stepper,
           approvals: this.approvals,
           crew: (cid) => this.members.get(cid),
+          transformContext,
+          afterRun,
           flush: this.journal ? () => this.journal!.flush() : undefined,
         }),
       );
     }
+    this.syncContext();
     this.bus.world(world.tick, world.snapshot());
     this.bus.app({ kind: 'crew', crew: this.crewViews() });
     if (this.clock) world.start();

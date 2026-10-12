@@ -78,6 +78,7 @@ export function Inspector() {
   useModels((s) => s.runs);
   const focus = useUi((s) => s.focus);
   const paused = useUi((s) => s.paused);
+  const meters = useUi((s) => s.meters);
   const crew = useUi((s) => s.crew);
   const running = runsModel.runs.some((r) => r.endedAt === undefined);
   const now = useNow(running);
@@ -171,6 +172,16 @@ export function Inspector() {
             <text x={12} y={lane.y + 18} fontSize={12} fill={CREW_COLORS[lane.id]} fontWeight={600} opacity={lane.active ? 1 : 0.4}>
               {lane.name}
             </text>
+            {lane.active && meters[lane.id] && (
+              <g>
+                <title>{`上下文：原始 ${meters[lane.id]!.estTokens} / 视图 ${meters[lane.id]!.viewTokens} / 预算 ${meters[lane.id]!.budget} 估算 token · ${meters[lane.id]!.messages} 条消息`}</title>
+                <rect x={12} y={lane.y + 28} width={44} height={5} rx={2} fill="#1e293b" />
+                <rect x={12} y={lane.y + 28} width={Math.min(44, (44 * meters[lane.id]!.estTokens) / meters[lane.id]!.budget)} height={5} rx={2} fill={meters[lane.id]!.estTokens > meters[lane.id]!.budget ? '#f43f5e' : CREW_COLORS[lane.id]} opacity={0.8} />
+                <text x={12} y={lane.y + 44} fontSize={9} fill="#64748b" className="num">
+                  {(meters[lane.id]!.estTokens / 1000).toFixed(1)}k/{(meters[lane.id]!.budget / 1000).toFixed(0)}k
+                </text>
+              </g>
+            )}
             {!lane.active && (
               <text x={GUTTER + 8} y={lane.y + 21} fontSize={11} fill="#475569">
                 {zh.inspector.notOnDuty}

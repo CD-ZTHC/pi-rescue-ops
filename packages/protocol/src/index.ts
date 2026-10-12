@@ -151,6 +151,7 @@ export type AppEvent =
     }
   | { kind: 'queue'; agentId: CrewId; steer: number; followUp: number; preview: string[]; steeringMode: 'all' | 'one-at-a-time'; followUpMode: 'all' | 'one-at-a-time' }
   | { kind: 'policy'; flags: PolicyFlags; stepping: boolean }
+  | { kind: 'context.meter'; agentId: CrewId; estTokens: number; viewTokens: number; budget: number; messages: number }
   | { kind: 'step.resumed'; agentId: CrewId }
   | { kind: 'bench.result'; agentId: CrewId; tool: string; args: unknown; isError: boolean; durationMs?: number; content: unknown[]; structured?: unknown; blocked?: boolean }
   | { kind: 'context.view'; agentId: CrewId; systemPrompt: string; tools: string[]; messages: unknown[]; llmMessages: unknown[] }

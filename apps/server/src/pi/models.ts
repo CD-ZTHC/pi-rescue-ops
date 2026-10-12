@@ -143,6 +143,11 @@ export interface ModelHub {
   createStreamFn(probe?: RequestProbe): StreamFn;
   /** 离线自由模式下 faux 队列空时调用的响应工厂 */
   setOfflineBrain(factory: FauxResponseFactory | undefined): void;
+  /** 书记员、分诊台、评审等「一次性」调用用的模型：live 用 flash；faux 用独立的 faux provider，不占课程脚本的响应队列 */
+  scribeModel(): Model<Api>;
+  createScribeStreamFn(): StreamFn;
+  /** 注册书记员等一次性调用的离线响应工厂 */
+  setAuxBrain(factory: FauxResponseFactory): void;
 }
 
 export function createModelHub(config: Config): ModelHub {
@@ -171,6 +176,11 @@ export function createModelHub(config: Config): ModelHub {
   });
   models.setProvider(faux.provider);
 
+  // 一次性调用（书记员 / 评审）专用的 faux provider：与船员的 faux 队列互不干扰
+  const auxFaux = fauxProvider({ provider: 'faux-aux', models: [{ id: config.specialistModel, reasoning: true, input: ['text', 'image'] }], tokensPerSecond: config.fauxTokensPerSecond });
+  models.setProvider(auxFaux.provider);
+  let auxBrain: FauxResponseFactory | undefined;
+
   const semaphore = new Semaphore(config.maxConcurrency);
   let offlineBrain: FauxResponseFactory | undefined;
 
@@ -189,6 +199,19 @@ export function createModelHub(config: Config): ModelHub {
     },
     setOfflineBrain(factory) {
       offlineBrain = factory;
+    },
+    setAuxBrain(factory) {
+      auxBrain = factory;
+    },
+    scribeModel() {
+      return hub.backend === 'live' ? hub.chat(config.specialistModel) : auxFaux.getModel();
+    },
+    createScribeStreamFn() {
+      const inner = hub.createStreamFn();
+      return (model, context, options) => {
+        if (model.provider === 'faux-aux' && auxBrain) auxFaux.appendResponses([auxBrain]);
+        return inner(model, context, options);
+      };
     },
     createStreamFn(probe) {
       return async (model, context, options) => {

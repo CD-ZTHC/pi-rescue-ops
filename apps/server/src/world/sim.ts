@@ -271,6 +271,18 @@ export class World {
     return view;
   }
 
+  /** 课程用：立即修好一个舱段 */
+  repairNow(id: ModuleId): void {
+    this.incidents.delete(id);
+    this.mutate((next, events) => {
+      const m = next.modules.find((x) => x.id === id)!;
+      m.status = 'ok';
+      m.alarm = undefined;
+      m.repair = undefined;
+      events.push({ type: 'module.repaired', tick: next.tick, module: id });
+    });
+  }
+
   /** 课程用：直接移除一个信号（不计入错失） */
   retire(id: string): void {
     this.mutate((next) => {

@@ -83,3 +83,21 @@ export function signalClues(truth: SignalTruth, signalId: string): string[] {
   if (signalId.endsWith('3') || signalId.endsWith('7')) clues.push('背景噪声偏高，读数置信度一般');
   return clues;
 }
+
+const VESSEL_NAMES = ['曙光', '远航', '青鸟', '启明', '长庚', '玄武', '白鹭', '海燕', '天枢', '摇光'];
+
+/** 求救无线电的文字转写（自定义消息 radio 的内容）。措辞不泄露真伪。 */
+export function radioTranscript(view: { id: string; kind: string; survivors: number }): string {
+  const n = Number(view.id.replace(/\D/g, '')) || 0;
+  const name = VESSEL_NAMES[n % VESSEL_NAMES.length];
+  switch (view.kind) {
+    case 'passenger':
+      return `这里是客船「${name}号」，主引擎失效，舱内 ${view.survivors} 人，请求救援，重复，请求救援。`;
+    case 'miner':
+      return `「${name}」矿船呼叫织女-7，船体受损，${view.survivors} 名矿工等待撤离。`;
+    case 'science':
+      return `科考船「${name}」……通讯断续……${view.survivors} 人……生命维持……`;
+    default:
+      return `自动信标 ${view.id}：检测到遇险，船员 ${view.survivors} 人。`;
+  }
+}

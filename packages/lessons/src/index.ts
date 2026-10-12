@@ -1,5 +1,7 @@
 // 课程定义（§8）。前端只读元数据；faux 脚本由后端执行。课程脚本同时就是该能力的回归测试（§11）。
 import {
+  getCurrentSystemPrompt,
+  getCurrentTools,
   fauxAssistantMessage,
   fauxText,
   fauxThinking,
@@ -46,6 +48,9 @@ const SUMMARIES: Record<number, string> = {
   9: 'finishTurn 在一个 turn 的全部工具结果写入之后、turn_end 之前运行。模型只说话不调用工具时，返回 { action: "continue" } 再要一轮；配合 prepareNextTurnWithContext 在下一轮之前追加一条提醒。注意：无条件返回 continue 会造成死循环，所以这里同时用请求预算兜底（指挥官每次运行最多 6 次请求）。',
   10: 'prepareRequest 在每次请求之前运行（包括第一次），此时排队的消息已经写入。这里做两件事：把最新那条态势刷新成请求时刻的世界（排队期间又来了 S-03）；存在 ≥2 个危急信号时把思考档位升到 medium。返回的 context / model / thinkingLevel 会替换本次及后续请求的运行时值。',
   11: 'steer() 的消息在当前 turn 的工具全部执行完之后注入；followUp() 的消息要等运行本来就要结束时才注入，并自动开始下一轮。队列模式默认 "all"：一次注入全部排队消息；改成 "one-at-a-time" 每次只注入一条。peekQueuedMessages() 能预览下一次将被注入的消息，显示在泳道末尾的队列徽章里。',
+  12: 'AgentMessage = LLM 消息 + 你声明合并的自定义消息（CustomAgentMessages）。本项目有 situation、radio、world_event、operator、compaction、ui_note 六种。convertToLlm 在每次请求前把它们转成模型能懂的 user 文本：只有最新一条态势完整渲染，旧的折叠成一行；ui_note 直接过滤。打开「模型看到的上下文」抽屉，左边是 agent.state.messages，右边是转换之后的结果。',
+  13: '首条 system 消息声明了 mission / rules / tools_guide / station_status / watch_phase 五个 section（稳定在前，易变在后，利于前缀缓存）。机库受损时：station_status 用一条只含 sections 的 system 消息打补丁；dispatch_drone 从 agent.state.tools 移除，pi 在下一次请求前自动写入工具差异。网关不支持中途声明工具（§2.3），所以完整工具表走 tools 参数。',
+  14: '三层上下文管理：transformContext 每次请求前做视图裁剪（不改原始消息，永远保留 system 消息，旧图片折叠，超预算时从完整的边界开始裁）；运行间隙（agent 空闲、队列为空）由书记员把最老的一段写成摘要，替换为一条 compaction 消息——这会直接修改 agent.state.messages；遇到上下文溢出时强制压缩再 continue()。本课把预算压到 1800 token，五个信号之后就会看到压缩。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
@@ -56,7 +61,13 @@ export interface LessonStep {
   label: string;
   target?: CrewId;
   thinkingLevel?: ThinkingLevelName;
-  trigger: { kind: 'situation'; reason: string } | { kind: 'operator'; text: string } | { kind: 'duty'; text: string };
+  trigger:
+    | { kind: 'situation'; reason: string }
+    | { kind: 'operator'; text: string }
+    | { kind: 'duty'; text: string }
+    | { kind: 'custom'; messages: Array<{ role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }> };
+  /** 本步开始前世界先发生的事 */
+  before?: { repair?: ModuleId; spawn?: number };
   /** faux 模式下本步要排入的响应 */
   responses: FauxResponseStep[];
   /** 课程自动驾驶：依次代替主管处理审批（主管抢先点了就以主管为准） */
@@ -78,6 +89,8 @@ export interface LessonScript {
     flareOnFirstSignal?: number;
     /** 额外生成 n 个「真实且危急」的信号，并预先研判（线索里出现「生命维持遥测断续」） */
     criticalSignals?: number;
+    /** 上下文预算（估算 token），课程结束后恢复 */
+    contextBudget?: number;
     /** 本课的策略开关（结束后恢复默认） */
     policy?: Partial<Record<PolicyKey, boolean>>;
   };
@@ -382,7 +395,111 @@ const lesson11: LessonScript = {
   ],
 };
 
-const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11].map((l) => [l.meta.id, l]));
+const userTexts = (messages: Message[]) => messages.filter((m) => m.role === 'user').map(textOf);
+
+const lesson12: LessonScript = {
+  meta: meta(12, true, '在 convertToLlm 里不过滤 ui_note：旁白会被当成用户消息发给模型'),
+  seed: 1012,
+  spawnSignals: 1,
+  expectTools: ['stand_by'],
+  steps: [
+    {
+      label: '一批自定义消息：无线电、站务、UI 旁白、态势',
+      thinkingLevel: 'low',
+      trigger: {
+        kind: 'custom',
+        messages: [
+          { role: 'radio', text: '这里是客船「曙光号」，主引擎失效，舱内 8 人，请求救援。' },
+          { role: 'world_event', text: 'D-2 已完成例行检修，回到机库。' },
+          { role: 'ui_note', text: '（旁白：这条只给界面看，模型永远看不到）' },
+          { role: 'situation', text: '新信号' },
+        ],
+      },
+      responses: [
+        (context) => {
+          const seen = userTexts(context.messages);
+          const kinds = seen.map((t) => t.match(/^【([^】·\s]+)/)?.[1] ?? '?');
+          return toolUse([
+            fauxThinking(`我收到 ${seen.length} 条消息：${kinds.join('、')}。${seen.some((t) => t.includes('旁白')) ? '看到了旁白！' : '没有看到旁白。'}`),
+            fauxText(`收到无线电、站务和态势（共 ${seen.length} 条）。`),
+            fauxToolCall('stand_by', { reason: `已收到 ${kinds.join('、')}` }),
+          ]);
+        },
+      ],
+    },
+  ],
+};
+
+const toolList = (messages: Message[]) => getCurrentTools(messages).map((t) => t.name);
+
+const lesson13: LessonScript = {
+  meta: meta(13, true, '去掉动态工具：机库受损时 dispatch_drone 仍在工具表里，模型调用后只会得到一个错误'),
+  seed: 1013,
+  spawnSignals: 1,
+  setup: { damage: [{ module: 'hangar', status: 'damaged' }] },
+  expectTools: ['stand_by', 'dispatch_drone', 'stand_by'],
+  steps: [
+    {
+      label: '机库受损：dispatch_drone 从工具表消失，提示词里的舱段状态随之更新',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        (context) => {
+          const tools = toolList(context.messages);
+          const status = getCurrentSystemPrompt(context.messages)?.match(/机库：(\S+)/)?.[1] ?? '?';
+          return toolUse([
+            fauxText(`机库${status}；可用工具 ${tools.length} 个${tools.includes('dispatch_drone') ? '' : '，没有 dispatch_drone'}。`),
+            fauxToolCall('stand_by', { reason: '机库受损，暂时无法出动' }),
+          ]);
+        },
+      ],
+    },
+    {
+      label: '机库修复：工具回来了',
+      thinkingLevel: 'low',
+      before: { repair: 'hangar' },
+      trigger: { kind: 'situation', reason: '机库已修复' },
+      responses: [
+        (context) => {
+          const status = getCurrentSystemPrompt(context.messages)?.match(/机库：(\S+)/)?.[1] ?? '?';
+          return toolUse([
+            fauxText(`机库${status}，dispatch_drone 回到了工具表，派 D-1 出发。`),
+            fauxToolCall('dispatch_drone', { droneId: 'D-1', signalId: 'S-01' }),
+          ]);
+        },
+        toolUse([fauxText('已出发。'), fauxToolCall('stand_by', { reason: '等待 D-1 回报' })]),
+      ],
+    },
+  ],
+};
+
+const lesson14: LessonScript = {
+  meta: meta(14, true, '关掉运行间隙压缩：上下文只增不减，只能靠视图裁剪每次临时丢掉最旧的消息', 'compaction'),
+  seed: 1014,
+  spawnSignals: 1,
+  setup: { contextBudget: 1800 },
+  expectTools: Array.from({ length: 5 }, () => ['inspect_signal', 'stand_by']).flat(),
+  steps: Array.from({ length: 5 }, (_, k) => ({
+    label: `第 ${k + 1} 个信号`,
+    thinkingLevel: 'low' as const,
+    before: k ? { spawn: 1 } : undefined,
+    trigger: { kind: 'situation' as const, reason: '新信号' },
+    responses: [
+      (context: { messages: Message[] }) => {
+        const id = [...[...context.messages].reverse().map(textOf).find((t) => t.startsWith('【态势'))!.matchAll(/^- (S-\d+)/gm)].at(-1)![1];
+        const summary = context.messages.some((m) => textOf(m).startsWith('【此前经过摘要】'));
+        return toolUse([
+          fauxText(`研判新信号 ${id}。${summary ? '（我看到了书记员的摘要）' : ''}`),
+          fauxToolCall('inspect_signal', { signalId: id }),
+        ]);
+      },
+      (context: { messages: Message[] }) =>
+        toolUse([fauxText(`${lastToolText(context.messages).slice(0, 30)}……已记录。`), fauxToolCall('stand_by', { reason: '已研判，等待下一条态势' })]),
+    ],
+  })),
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14].map((l) => [l.meta.id, l]));
 
 function meta(index: number, available: boolean, toggle: string, toggleKey?: PolicyKey): LessonMeta {
   const row = ROWS[index - 1];

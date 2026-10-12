@@ -40,6 +40,7 @@ interface UiSlice {
   paused: Extract<AppEvent, { kind: 'step.paused' }> | null;
   approvals: Array<Extract<AppEvent, { kind: 'approval.requested' }>>;
   queues: Partial<Record<CrewId, Extract<AppEvent, { kind: 'queue' }>>>;
+  meters: Partial<Record<CrewId, Extract<AppEvent, { kind: 'context.meter' }>>>;
   bench: Array<Extract<AppEvent, { kind: 'bench.result' }> & { at: number }>;
   contextAgent: CrewId;
   benchOpen: boolean;
@@ -58,6 +59,7 @@ export const useUi = create<UiSlice>(() => ({
   paused: null,
   approvals: [],
   queues: {},
+  meters: {},
   bench: [],
   contextAgent: 'commander',
   benchOpen: false,
@@ -120,6 +122,8 @@ export function ingest(msg: ServerMsg): void {
       for (const h of msg.history) {
         runsModel.apply(h);
         commsModel.apply(h);
+        // 状态型的应用事件也要回放（提示类、审批类不回放，避免弹出过期的提醒）
+        if (h.t === 'app' && (h.ev.kind === 'context.meter' || h.ev.kind === 'queue' || h.ev.kind === 'crew')) applyUi(h.ev);
         observeClock(h.at);
       }
       dirtyRuns = dirtyComms = true;
@@ -180,6 +184,9 @@ function applyUi(ev: AppEvent): void {
       return;
     case 'queue':
       useUi.setState((s) => ({ queues: { ...s.queues, [ev.agentId]: ev } }));
+      return;
+    case 'context.meter':
+      useUi.setState((s) => ({ meters: { ...s.meters, [ev.agentId]: ev } }));
       return;
     case 'bench.result':
       useUi.setState((s) => ({ bench: [{ ...ev, at: Date.now() }, ...s.bench].slice(0, 20) }));

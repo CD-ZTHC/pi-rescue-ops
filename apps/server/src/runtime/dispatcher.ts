@@ -11,7 +11,8 @@
 import type { CrewId, WorldEvent } from '@rescue/protocol';
 import { MODULE_NAMES, SIGNAL_KIND_NAMES } from '@rescue/protocol';
 import type { CrewMember } from '../pi/crew.ts';
-import { situationMessage, worldEventMessage } from '../pi/messages.ts';
+import { radioMessage, situationMessage, worldEventMessage } from '../pi/messages.ts';
+import { radioTranscript } from '../world/spawner.ts';
 import type { World } from '../world/sim.ts';
 
 export interface DispatcherDeps {
@@ -82,7 +83,8 @@ export class Dispatcher {
       case 'signal.spawned': {
         const s = ev.signal;
         const msg = situationMessage(world.snapshot(), [`新信号 ${s.id}（${s.sector} 区${SIGNAL_KIND_NAMES[s.kind]}）`]);
-        return [['commander', commander.deliver(msg, this.deps.isUrgent?.(ev) ? 'steer' : 'followUp')]];
+        const radio = radioMessage(s.id, radioTranscript(s));
+        return [['commander', commander.deliver([radio, msg], this.deps.isUrgent?.(ev) ? 'steer' : 'followUp')]];
       }
       case 'flare.warning': {
         const msg = situationMessage(world.snapshot(), [`耀斑预警：${ev.sectors.join('、')} 区将在 ${ev.startTick - ev.tick} 秒后爆发`]);

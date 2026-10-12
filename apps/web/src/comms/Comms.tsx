@@ -72,6 +72,36 @@ const Entry = memo(function Entry({ entry }: { entry: CommsEntry; rev: number })
       )}
       {entry.kind === 'tool' && <ToolCard e={entry} focused={focus === entry.toolCallId} />}
       {entry.kind === 'approval' && <ApprovalCard e={entry} />}
+      {entry.kind === 'radio' && (
+        <div className="rounded-md border border-dashed border-orange-400/40 bg-orange-500/5 px-2.5 py-1.5 text-[12px] text-orange-100">
+          📻 <span className="num text-orange-300">{entry.signalId}</span> 无线电：<span className="italic">{entry.text}</span>
+        </div>
+      )}
+      {entry.kind === 'system' && (
+        <div className="flex items-center gap-2 text-[11px] text-slate-500">
+          <span style={{ color: CREW_COLORS[entry.agentId] }}>🧩</span>
+          <span>
+            {NAMES[entry.agentId]} · {entry.text}
+          </span>
+        </div>
+      )}
+      {entry.kind === 'compaction' && (
+        <motion.div
+          initial={{ scaleY: 2.2, opacity: 0.2 }}
+          animate={{ scaleY: 1, opacity: 1 }}
+          transition={{ duration: 0.6, ease: [0.2, 0.9, 0.2, 1] }}
+          style={{ originY: 0 }}
+          className="rounded-md border border-slate-500/40 bg-slate-800/40 px-2.5 py-1.5 text-[12px]"
+        >
+          <div className="mb-0.5 text-slate-300">
+            📚 书记员为 <span style={{ color: CREW_COLORS[entry.agentId] }}>{NAMES[entry.agentId]}</span> 折叠了上下文
+            <span className="num ml-1 text-slate-500">
+              {entry.before} → {entry.after} token
+            </span>
+          </div>
+          <div className="whitespace-pre-wrap text-[11.5px] text-slate-400">{entry.summary}</div>
+        </motion.div>
+      )}
       {entry.kind === 'duty' && (
         <div className="flex items-center gap-2 text-[11.5px] text-slate-400">
           <span style={{ color: CREW_COLORS[entry.agentId] }}>🛠</span>

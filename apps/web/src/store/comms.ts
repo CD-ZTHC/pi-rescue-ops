@@ -38,6 +38,9 @@ export type CommsEntry =
       images: string[];
     }
   | { kind: 'duty'; id: string; at: number; agentId: CrewId; text: string }
+  | { kind: 'radio'; id: string; at: number; signalId: string; text: string }
+  | { kind: 'system'; id: string; at: number; agentId: CrewId; text: string }
+  | { kind: 'compaction'; id: string; at: number; agentId: CrewId; before: number; after: number; summary: string }
   | { kind: 'approval'; id: string; at: number; approvalId: string; agentId: CrewId; tool: string; args: unknown; risk: string; expiresAt: number; decision?: string }
   | { kind: 'world'; id: string; at: number; text: string; tone: 'info' | 'warn' | 'ok' | 'danger'; correlationId?: string }
   | { kind: 'notice'; id: string; at: number; level: 'info' | 'warn' | 'error'; text: string };
@@ -103,6 +106,23 @@ export class CommsModel {
         }
         if (m.role === 'situation') {
           this.push({ kind: 'situation', id: this.id(), at, agentId, reasons: m.reasons, signals: m.brief.signals.length, tick: m.tick });
+          return true;
+        }
+        if (m.role === 'radio') {
+          this.push({ kind: 'radio', id: this.id(), at, signalId: m.signalId, text: m.transcript });
+          return true;
+        }
+        if (m.role === 'system') {
+          const parts: string[] = [];
+          if (m.sections) parts.push(`提示词补丁：${Object.keys(m.sections).join('、')}`);
+          if (m.toolsAdded?.length) parts.push(`工具 +${m.toolsAdded.map((t) => t.name).join(' +')}`);
+          if (m.toolsRemoved?.length) parts.push(`工具 −${m.toolsRemoved.map((t) => t.name).join(' −')}`);
+          if (!parts.length) return false;
+          this.push({ kind: 'system', id: this.id(), at, agentId, text: parts.join('；') });
+          return true;
+        }
+        if (m.role === 'world_event' && (m.kind === 'nudge' || m.kind === 'view_trim')) {
+          this.push({ kind: 'system', id: this.id(), at, agentId, text: m.text });
           return true;
         }
         if (m.role === 'world_event' && m.kind === 'duty') {
@@ -175,6 +195,9 @@ export class CommsModel {
 
   private applyApp(ev: AppEvent, at: number): boolean {
     switch (ev.kind) {
+      case 'compaction':
+        this.push({ kind: 'compaction', id: this.id(), at, agentId: ev.agentId, before: ev.beforeTokens, after: ev.afterTokens, summary: ev.summary });
+        return true;
       case 'approval.requested':
         this.push({ kind: 'approval', id: this.id(), at, approvalId: ev.approvalId, agentId: ev.agentId, tool: ev.tool, args: ev.args, risk: ev.risk, expiresAt: ev.expiresAt });
         return true;

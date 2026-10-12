@@ -143,3 +143,44 @@ test('第 11 课：steer 在工具批次之后注入，followUp 在运行将要�
   assert.ok(roles.lastIndexOf('tool:stand_by', follow) < follow && roles[follow - 1] === 'tool:stand_by', `followUp 应在第一次 stand_by 之后：${roles.join(' → ')}`);
   await station.shutdown();
 });
+
+const lastText = (station: Awaited<ReturnType<typeof runLesson>>['station']) =>
+  station.commander.agent.state.messages
+    .filter((m) => m.role === 'assistant')
+    .flatMap((m) => m.content)
+    .map((c) => (c.type === 'text' ? c.text : c.type === 'thinking' ? c.thinking : ''))
+    .join('|');
+
+test('第 12 课：自定义消息转成带前缀的 user 文本；ui_note 被过滤', async () => {
+  const { station } = await runLesson('L12');
+  const said = lastText(station);
+  assert.match(said, /收到 3 条消息：无线电、站务、态势/);
+  assert.match(said, /没有看到旁白/);
+  await station.shutdown();
+});
+
+test('第 13 课：机库受损时工具表里没有 dispatch_drone，提示词显示受损；修复后两者都恢复', async () => {
+  const { station } = await runLesson('L13');
+  const said = lastText(station);
+  assert.match(said, /机库受损；可用工具 \d+ 个，没有 dispatch_drone/);
+  assert.match(said, /机库正常，dispatch_drone 回到了工具表/);
+  const sys = station.commander.agent.state.messages.filter((m) => m.role === 'system');
+  assert.ok(sys.some((m) => m.sections?.station_status), '写入了 sections 补丁');
+  assert.ok(sys.some((m) => m.toolsRemoved?.some((t) => t.name === 'dispatch_drone')), 'pi 写入了工具差异');
+  await station.shutdown();
+});
+
+test('第 14 课：长班次触发书记员压缩，之后的请求能看到摘要', async () => {
+  const station = testStation();
+  station.startFreePlay();
+  const compactions: unknown[] = [];
+  station.bus.subscribe((m) => m.t === 'app' && m.ev.kind === 'compaction' && compactions.push(m.ev));
+  const stop = drive(station, 15);
+  await station.loadLesson('L14', 'faux');
+  stop();
+  assert.equal(station.lesson?.status, 'done');
+  assert.ok(compactions.length >= 1, '至少压缩一次');
+  assert.match(lastText(station), /我看到了书记员的摘要/);
+  assert.equal(station.contextBudget, 24_000, '课程结束后恢复预算');
+  await station.shutdown();
+});

@@ -74,6 +74,13 @@ export interface CrewMember {
   lastReport(): Record<string, unknown> | undefined;
   /** 动态工具（M4）：替换可执行工具表，pi 会在下一次请求前写入一条工具差异 system 消息 */
   setTools(tools: AgentTool<any>[]): void;
+  /** 按可用性过滤完整工具表（舱段受损时工具消失，修复后回来）；返回是否有变化 */
+  syncTools(available: (name: string) => boolean): boolean;
+  /** 加入额外工具（M6：地面站 MCP 工具）；同名替换 */
+  addTools(extra: AgentTool<any>[]): void;
+  removeTools(names: string[]): void;
+  /** system sections 补丁：在下一次 prompt / steer / followUp 的消息批次前插入（§5.3） */
+  patchSections(sections: Record<string, string | null>): void;
   /** 工具试验台：用 runToolCall 执行，经过与模型调用完全相同的 hook */
   bench(tool: string, args: unknown): ReturnType<typeof runToolCall>;
   view(): CrewView;
@@ -92,6 +99,14 @@ const preview = (m: AgentMessage): string => {
 export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   const probe = createRequestProbe();
   let tools = spec.tools(deps);
+  let allTools = tools;
+  let pendingSections: Record<string, string | null> | undefined;
+  const withSections = (list: AgentMessage[]): AgentMessage[] => {
+    if (!pendingSections) return list;
+    const sys: AgentMessage = { role: 'system', content: '', sections: pendingSections, timestamp: Date.now() };
+    pendingSections = undefined;
+    return [sys, ...list];
+  };
   const base = renderBaseSystem(spec, deps.world.snapshot());
   let lastError: string | undefined;
   let running = false;
@@ -222,7 +237,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       return running || agent.state.isStreaming;
     },
     deliver(messages, mode) {
-      const list = Array.isArray(messages) ? messages : [messages];
+      const list = withSections(Array.isArray(messages) ? messages : [messages]);
       // 空闲时无论哪种模式都直接开始一次运行
       if (!member.isRunning) {
         void member.run(list);
@@ -240,8 +255,9 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
     async run(messages) {
       running = true;
       let last: AssistantMessage | undefined;
+      const batch = withSections(Array.isArray(messages) ? messages : [messages]);
       try {
-        last = await runToEnd(() => agent.prompt(messages));
+        last = await runToEnd(() => agent.prompt(batch));
       } finally {
         running = agent.state.isStreaming;
         if (!running && deferred.length) {
@@ -273,6 +289,24 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       toolMeta = meta(next);
       agent.state.tools = next;
       deps.bus.app({ kind: 'crew', crew: [member.view()] });
+    },
+    syncTools(available) {
+      const next = allTools.filter((t) => available(t.name));
+      if (next.map((t) => t.name).join() === tools.map((t) => t.name).join()) return false;
+      member.setTools(next);
+      return true;
+    },
+    addTools(extra) {
+      const names = new Set(extra.map((t) => t.name));
+      allTools = [...allTools.filter((t) => !names.has(t.name)), ...extra];
+      member.setTools([...tools.filter((t) => !names.has(t.name)), ...extra]);
+    },
+    removeTools(names) {
+      allTools = allTools.filter((t) => !names.includes(t.name));
+      member.setTools(tools.filter((t) => !names.includes(t.name)));
+    },
+    patchSections(sections) {
+      pendingSections = { ...pendingSections, ...sections };
     },
     bench(tool, args) {
       const toolCall = { type: 'toolCall' as const, id: `bench-${Date.now().toString(36)}`, name: tool, arguments: (args ?? {}) as Record<string, JsonValue> };

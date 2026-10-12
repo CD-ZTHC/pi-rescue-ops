@@ -103,3 +103,20 @@ export function crewSpecs(config: Config): Record<CrewId, CrewSpec> {
     medic: medicSpec(config),
   };
 }
+
+/** 动态工具（§5.3）：舱段状态决定哪些工具可用 */
+export function toolAvailable(name: string, world: { module(id: 'sensors' | 'hangar' | 'medbay' | 'comms'): { status: string } }): boolean {
+  switch (name) {
+    case 'dispatch_drone':
+      return world.module('hangar').status === 'ok';
+    case 'scan_sector':
+    case 'compare_frames':
+      return world.module('sensors').status !== 'offline';
+    case 'prepare_medbay':
+      return world.module('medbay').status === 'ok';
+    case 'inspect_camera':
+      return world.module('comms').status !== 'offline';
+    default:
+      return true;
+  }
+}
