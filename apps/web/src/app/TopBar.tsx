@@ -49,7 +49,10 @@ export function TopBar() {
       </Stat>
       <Stat label={zh.fuel} title={`${world.fuel}/${world.fuelMax}`}>
         <Meter value={world.fuel} max={world.fuelMax} color={fuelColor} />
-        <span className="num text-slate-300">{world.fuel}</span>
+        <span className="num text-slate-300">
+          {world.fuel}
+          {world.fuelReserved ? <span className="text-slate-500">（留 {world.fuelReserved}）</span> : null}
+        </span>
       </Stat>
       <Stat label={zh.drones}>
         <span className="num">{docked}/{world.drones.length}</span>
@@ -57,10 +60,23 @@ export function TopBar() {
       <Stat label={zh.beds}>
         <span className="num">{world.beds}/{world.bedsTotal}</span>
       </Stat>
+      {world.flares.map((f) => (
+        <span
+          key={f.id}
+          className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[12px] ${world.tick >= f.startTick ? 'animate-pulse bg-rose-500/25 text-rose-100' : 'bg-amber-500/20 text-amber-100'}`}
+        >
+          ☀ 耀斑 {f.sectors.join('、')} 区 {world.tick >= f.startTick ? `爆发中 ${f.endTick - world.tick}s` : `${f.startTick - world.tick}s 后爆发`}
+        </span>
+      ))}
+      {world.patients.some((p) => p.members.some((m) => m.status === 'unknown')) && (
+        <Stat label="待评估">
+          <span className="num text-amber-200">{world.patients.filter((p) => p.members.some((m) => m.status === 'unknown')).length} 组</span>
+        </Stat>
+      )}
       <Stat label={zh.rescued}>
         <span className="num text-emerald-300">{world.score.rescued}</span>
       </Stat>
-      <Stat label={zh.score}>
+      <Stat label={zh.score} title={`获救 ${world.score.rescued}×10 · 诱饵燃料 −${world.score.hoaxFuel} · 错失 ${world.score.missed}×−15 · 死亡 ${world.score.deaths}×−10 · 违规 ${world.score.penalties}×−5`}>
         <span className="num">{world.score.total}</span>
       </Stat>
       <Stat label={zh.cost} title={`累计 ${runsModel.totalTokens} token，按 model.cost 计算`}>

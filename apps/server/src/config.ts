@@ -18,6 +18,8 @@ export interface Config {
   port: number;
   seed: number;
   missionsDir: string;
+  /** faux 模型的流式速度（token/秒），测试里调高 */
+  fauxTokensPerSecond: number;
 }
 
 function num(v: string | undefined, fallback: number): number {
@@ -53,5 +55,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: num(env.SERVER_PORT, 8787),
     seed: num(env.WORLD_SEED, 20261012),
     missionsDir: env.MISSIONS_DIR || 'missions',
+    fauxTokensPerSecond: num(env.FAUX_TPS, 60),
   };
 }

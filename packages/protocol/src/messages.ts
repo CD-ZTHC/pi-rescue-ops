@@ -8,7 +8,11 @@ export interface SituationBrief {
   dronesDocked: number;
   dronesTotal: number;
   modules: Array<{ name: string; status: ModuleStatus }>;
-  signals: Array<{ id: string; sector: string; kind: string; survivors: number; remaining: number; clues: string[] }>;
+  signals: Array<{ id: string; sector: string; kind: string; survivors: number; remaining: number; clues: string[]; status: string; scanned: boolean; reservedFuel?: number }>;
+  drones: Array<{ id: string; status: string; target?: string }>;
+  flares: Array<{ sectors: string[]; startsIn: number; active: boolean }>;
+  patientsPending: number;
+  fuelReserved: number;
 }
 
 declare module '@earendil-works/pi-agent-core' {

@@ -1,6 +1,6 @@
 // 通讯频道模型：由 agent 事件（流式文本、思考、工具）与应用事件（站务、主管、提示）派生。
 import type { AppEvent, CrewId, ServerMsg, WorldEvent } from '@rescue/protocol';
-import { SECTOR_NAMES } from '@rescue/protocol';
+import { MODULE_NAMES, SECTOR_NAMES } from '@rescue/protocol';
 import { zh } from '../i18n/zh.ts';
 
 export type CommsEntry =
@@ -29,12 +29,22 @@ export type CommsEntry =
       name: string;
       status: 'running' | 'ok' | 'error';
       progress?: string;
+      /** onUpdate 里的 details.progress（0..1） */
+      progressRatio?: number;
       summary?: string;
       structured?: unknown;
       args?: unknown;
+      /** 工具结果里的图片（data URL） */
+      images: string[];
     }
+  | { kind: 'duty'; id: string; at: number; agentId: CrewId; text: string }
   | { kind: 'world'; id: string; at: number; text: string; tone: 'info' | 'warn' | 'ok' | 'danger'; correlationId?: string }
   | { kind: 'notice'; id: string; at: number; level: 'info' | 'warn' | 'error'; text: string };
+
+function imagesOf(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((c: { type?: string; data?: string; mimeType?: string }) => (c?.type === 'image' && c.data ? [`data:${c.mimeType ?? 'image/png'};base64,${c.data}`] : []));
+}
 
 const firstText = (content: unknown): string | undefined =>
   Array.isArray(content) ? content.find((c: { type?: string }) => c?.type === 'text')?.text : undefined;
@@ -94,6 +104,10 @@ export class CommsModel {
           this.push({ kind: 'situation', id: this.id(), at, agentId, reasons: m.reasons, signals: m.brief.signals.length, tick: m.tick });
           return true;
         }
+        if (m.role === 'world_event' && m.kind === 'duty') {
+          this.push({ kind: 'duty', id: this.id(), at, agentId, text: m.text });
+          return true;
+        }
         return false;
       }
       case 'message_update_batch': {
@@ -126,7 +140,7 @@ export class CommsModel {
       }
       case 'tool_execution_start': {
         const entry: Extract<CommsEntry, { kind: 'tool' }> = {
-          kind: 'tool', id: this.id(), at, agentId, toolCallId: ev.toolCallId, name: ev.toolName, status: 'running', args: ev.args,
+          kind: 'tool', id: this.id(), at, agentId, toolCallId: ev.toolCallId, name: ev.toolName, status: 'running', args: ev.args, images: [],
         };
         this.tools.set(ev.toolCallId, entry);
         this.push(entry);
@@ -136,6 +150,8 @@ export class CommsModel {
         const entry = this.tools.get(ev.toolCallId);
         if (!entry) return false;
         entry.progress = firstText(ev.partialResult?.content);
+        const ratio = ev.partialResult?.details?.progress;
+        if (typeof ratio === 'number') entry.progressRatio = ratio;
         this.touch(entry);
         return true;
       }
@@ -145,6 +161,8 @@ export class CommsModel {
         entry.status = ev.isError ? 'error' : 'ok';
         entry.summary = firstText(ev.result?.content);
         entry.structured = ev.result?.structuredContent;
+        entry.images = imagesOf(ev.result?.content);
+        entry.progressRatio = undefined;
         this.tools.delete(ev.toolCallId);
         this.touch(entry);
         return true;
@@ -182,9 +200,37 @@ function worldLine(ev: WorldEvent): { text: string; tone: 'info' | 'warn' | 'ok'
     case 'signal.lost':
       return { text: w.lost(ev.signalId), tone: 'danger' };
     case 'scan.completed':
-      return { text: w.scanDone(SECTOR_NAMES[ev.sector].replace(' 区', ''), ev.signalIds.length), tone: 'info', correlationId: ev.correlationId };
+      return { text: w.scanDone(SECTOR_NAMES[ev.sector].replace(' 区', ''), ev.signalIds.length, ev.partial), tone: ev.partial ? 'warn' : 'info', correlationId: ev.correlationId };
     case 'shift.ended':
       return { text: w.shiftEnded(ev.score.total), tone: 'ok' };
+    case 'drone.dispatched':
+      return { text: w.dispatched(ev.droneId, ev.signalId, ev.eta, ev.fuel, ev.hazardous), tone: 'info', correlationId: ev.correlationId };
+    case 'drone.arrived':
+      return { text: w.arrived(ev.droneId, ev.signalId, ev.outcome, ev.survivors), tone: ev.outcome === 'rescued' ? 'ok' : 'danger', correlationId: ev.correlationId };
+    case 'drone.returned':
+      return { text: w.returned(ev.droneId, ev.survivors, ev.damaged), tone: ev.damaged ? 'warn' : 'ok', correlationId: ev.correlationId };
+    case 'drone.damaged':
+      return { text: w.droneDamaged(ev.droneId), tone: 'danger' };
+    case 'flare.warning':
+      return { text: w.flareWarning(ev.sectors.join('、'), ev.startTick - ev.tick), tone: 'warn' };
+    case 'flare.started':
+      return { text: w.flareStarted(ev.sectors.join('、')), tone: 'danger' };
+    case 'flare.ended':
+      return { text: w.flareEnded, tone: 'info' };
+    case 'module.damaged':
+      return { text: w.moduleDamaged(MODULE_NAMES[ev.module], ev.status, ev.alarm), tone: 'danger' };
+    case 'module.repaired':
+      return { text: w.moduleRepaired(MODULE_NAMES[ev.module]), tone: 'ok', correlationId: ev.correlationId };
+    case 'vent.result':
+      return { text: w.vent(MODULE_NAMES[ev.module], ev.cell, ev.success), tone: ev.success ? 'ok' : 'danger', correlationId: ev.correlationId };
+    case 'patient.arrived':
+      return { text: w.patientArrived(ev.patient.id, ev.patient.count, ev.patient.members.length), tone: 'warn' };
+    case 'patient.bedded':
+      return { text: w.patientBedded(ev.patientId, ev.members), tone: 'ok', correlationId: ev.correlationId };
+    case 'patient.lost':
+      return { text: w.patientLost(ev.patientId, ev.member), tone: 'danger' };
+    case 'fuel.allocated':
+      return { text: w.fuelAllocated(ev.signalId, ev.amount), tone: 'info', correlationId: ev.correlationId };
     default:
       return undefined;
   }

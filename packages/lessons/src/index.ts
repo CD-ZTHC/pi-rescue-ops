@@ -7,7 +7,7 @@ import {
   type FauxResponseStep,
   type Message,
 } from '@earendil-works/pi-ai';
-import type { LessonMeta } from '@rescue/protocol';
+import type { CrewId, IncidentKind, LessonMeta, ModuleId, ModuleStatus } from '@rescue/protocol';
 
 type MetaRow = [index: number, title: string, capability: string, scenario: string, milestone: string];
 
@@ -38,16 +38,21 @@ const ROWS: MetaRow[] = [
 
 const SUMMARIES: Record<number, string> = {
   1: '一次 prompt 会产生怎样的事件序列？agent_start → turn_start → message_start/end（态势）→ 流式 assistant 消息 → 工具执行 → 下一个 turn → agent_end。看 Inspector：每个 turn 是一个色块，请求条里的竖线是 TTFT，下方的甘特条是工具执行。stand_by 返回 terminate，所以运行在工具批次之后直接结束，不再发起请求。',
+  3: '工具参数先经过 prepareArguments（把「c区」归一化为「C」），再由 TypeBox 按 schema 校验。校验失败不会抛到你的代码里：pi 把错误作为 isError 的工具结果回传给模型，模型下一轮自行更正。stand_by 返回 terminate: true，整批工具都 terminate 时运行直接结束，不再发起请求。',
+  4: '同一条 assistant 消息里的多个工具调用，默认（toolExecution: "parallel"）并发执行：Inspector 中三条扫描纵向叠放。只要批次里有一个工具声明 executionMode: "sequential"（dispatch_drone），整批改为串行，工具条首尾相接。tool_execution_end 按完成顺序发出，而 toolResult 消息仍按调用顺序写入。',
+  5: '长任务通过 execute 的第四个参数 onUpdate 流式汇报进度，每次调用都会产生一个 tool_execution_update 事件。工程师修复机库要 8 秒：Inspector 的工具条上每秒一道刻度，频道卡片里显示百分比。onUpdate 只在 execute 运行期间有效，结束后的调用会被忽略。',
+  6: 'pi 1.1 的工具结果有两份：content 给模型看，structuredContent 给程序和 UI（必须符合 outputSchema）。业务失败返回 isError: true，而不是抛错——这样 details 与 structuredContent 都能保留下来。传感器受损时扫描只拿到半个扇区：模型看到错误，UI 仍能画出部分结果。注意：核心不会把 structuredContent 写进 transcript，只能从 tool_execution_end 事件获取。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
 export type ThinkingLevelName = 'off' | 'minimal' | 'low' | 'medium' | 'high';
 
-/** 一次触发：给指挥官送一条消息并跑完整个运行 */
+/** 一次触发：给某个船员（默认指挥官）送一条消息并跑完整个运行 */
 export interface LessonStep {
   label: string;
+  target?: CrewId;
   thinkingLevel?: ThinkingLevelName;
-  trigger: { kind: 'situation'; reason: string } | { kind: 'operator'; text: string };
+  trigger: { kind: 'situation'; reason: string } | { kind: 'operator'; text: string } | { kind: 'duty'; text: string };
   /** faux 模式下本步要排入的响应 */
   responses: FauxResponseStep[];
 }
@@ -57,6 +62,7 @@ export interface LessonScript {
   seed: number;
   /** 开课时预先生成的信号数 */
   spawnSignals: number;
+  setup?: { damage?: Array<{ module: ModuleId; status: ModuleStatus; incident?: { kind: IncidentKind; cell: string } }> };
   steps: LessonStep[];
   /** 回归断言：faux 模式下本课应依次调用的工具 */
   expectTools: string[];
@@ -65,11 +71,13 @@ export interface LessonScript {
 const textOf = (m: Message | undefined): string =>
   !m ? '' : typeof m.content === 'string' ? m.content : m.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
 
-/** 从上下文最新态势中找第一个尚未扫描的星区 */
+/** 从上下文最新态势中找第一个信号所在的星区 */
 const firstUnscanned = (messages: Message[]): string => {
   const situation = [...messages].reverse().map(textOf).find((t) => t.startsWith('【态势')) ?? '';
-  return situation.match(/^- S-\d+｜([A-F]) 区.*尚未扫描/m)?.[1] ?? 'A';
+  return situation.match(/^- S-\d+｜([A-F]) 区/m)?.[1] ?? 'A';
 };
+
+const lastToolText = (messages: Message[]): string => textOf([...messages].reverse().find((m) => m.role === 'toolResult'));
 
 const lesson1: LessonScript = {
   meta: meta(1, true, ''),
@@ -142,10 +150,111 @@ const lesson2: LessonScript = {
   })),
 };
 
-const SCRIPTS: Record<string, LessonScript> = {
-  [lesson1.meta.id]: lesson1,
-  [lesson2.meta.id]: lesson2,
+
+const toolUse = (blocks: Parameters<typeof fauxAssistantMessage>[0]) => fauxAssistantMessage(blocks, { stopReason: 'toolUse' });
+
+const lesson3: LessonScript = {
+  meta: meta(3, true, '去掉 prepareArguments：「c区」也会被 TypeBox 拒绝，模型要多走一轮'),
+  seed: 1003,
+  spawnSignals: 1,
+  expectTools: ['scan_sector', 'scan_sector', 'stand_by'],
+  steps: [
+    {
+      label: '模型传了非法星区',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        toolUse([fauxThinking('信号在……G 区？先扫描。'), fauxText('扫描信号所在星区。'), fauxToolCall('scan_sector', { sector: 'G区' })]),
+        (context) => {
+          const sector = firstUnscanned(context.messages);
+          return toolUse([
+            fauxThinking(`参数校验失败：星区只有 A–F。信号在 ${sector} 区。`),
+            fauxText(`更正：扫描 ${sector} 区。`),
+            // 小写 +「区」：由 prepareArguments 归一化为大写字母
+            fauxToolCall('scan_sector', { sector: `${sector.toLowerCase()}区` }),
+          ]);
+        },
+        toolUse([fauxText('扫描完成，图像已归档。'), fauxToolCall('stand_by', { reason: '已取得雷达成像，等待研判' })]),
+      ],
+    },
+  ],
 };
+
+const lesson4: LessonScript = {
+  meta: meta(4, true, '把全局 toolExecution 改成 sequential：第一批三次扫描会首尾相接，总耗时变成三倍'),
+  seed: 1004,
+  spawnSignals: 2,
+  expectTools: ['scan_sector', 'scan_sector', 'scan_sector', 'inspect_signal', 'dispatch_drone', 'stand_by'],
+  steps: [
+    {
+      label: '并行扫描三个星区，再混入一次串行的 dispatch_drone',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        toolUse([
+          fauxThinking('三个星区互不相干，同一个回复里并行扫描。'),
+          fauxText('并行扫描 A、C、E 区。'),
+          fauxToolCall('scan_sector', { sector: 'A' }),
+          fauxToolCall('scan_sector', { sector: 'C' }),
+          fauxToolCall('scan_sector', { sector: 'E' }),
+        ]),
+        toolUse([
+          fauxThinking('研判 S-01，同时派 D-1 出发。dispatch_drone 声明为 sequential，整批会串行执行。'),
+          fauxText('研判 S-01，并派 D-1 前往。'),
+          fauxToolCall('inspect_signal', { signalId: 'S-01' }),
+          fauxToolCall('dispatch_drone', { droneId: 'D-1', signalId: 'S-01' }),
+        ]),
+        toolUse([fauxText('D-1 已出发。'), fauxToolCall('stand_by', { reason: '等待 D-1 回报' })]),
+      ],
+    },
+  ],
+};
+
+const lesson5: LessonScript = {
+  meta: meta(5, true, '去掉 onUpdate：修复期间 Inspector 的工具条上不再有进度刻度，频道里也看不到百分比'),
+  seed: 1005,
+  spawnSignals: 0,
+  setup: { damage: [{ module: 'hangar', status: 'damaged' }] },
+  expectTools: ['diagnose_module', 'repair_module', 'report_back'],
+  steps: [
+    {
+      label: '工程师修复机库',
+      target: 'engineer',
+      trigger: { kind: 'duty', text: '机库受损，请诊断并修复。' },
+      responses: [
+        toolUse([fauxText('先看读数。'), fauxToolCall('diagnose_module', { module: '机库' })]),
+        toolUse([fauxText('没有明火，直接修复。'), fauxToolCall('repair_module', { module: 'hangar' })]),
+        (context) => toolUse([fauxToolCall('report_back', { summary: lastToolText(context.messages), findings: ['修复期间每秒回报一次进度'] })]),
+      ],
+    },
+  ],
+};
+
+const lesson6: LessonScript = {
+  meta: meta(6, true, '不返回 structuredContent：UI 只能显示一行文字，部分扫描结果的卡片消失'),
+  seed: 1006,
+  spawnSignals: 2,
+  setup: { damage: [{ module: 'sensors', status: 'damaged' }] },
+  expectTools: ['scan_sector', 'inspect_signal', 'stand_by'],
+  steps: [
+    {
+      label: '传感器受损时扫描：部分失败',
+      thinkingLevel: 'low',
+      trigger: { kind: 'situation', reason: '新信号' },
+      responses: [
+        (context) => toolUse([fauxText('扫描信号所在星区。'), fauxToolCall('scan_sector', { sector: firstUnscanned(context.messages) })]),
+        toolUse([
+          fauxThinking('扫描返回 isError，但 structuredContent 里仍有已探测到的信号。改用文字研判补足。'),
+          fauxText('扫描不完整，改用研判。'),
+          fauxToolCall('inspect_signal', { signalId: 'S-01' }),
+        ]),
+        toolUse([fauxText('已取得文字线索。'), fauxToolCall('stand_by', { reason: '传感器受损，等待工程师修复后再扫' })]),
+      ],
+    },
+  ],
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6].map((l) => [l.meta.id, l]));
 
 function meta(index: number, available: boolean, toggle: string): LessonMeta {
   const row = ROWS[index - 1];

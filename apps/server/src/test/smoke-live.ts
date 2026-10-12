@@ -9,6 +9,7 @@ import { convertToLlm } from '../pi/messages.ts';
 import { createModelHub, type ModelHub } from '../pi/models.ts';
 import { Raster } from '../world/render/raster.ts';
 import { Station } from '../runtime/station.ts';
+import { worldEventMessage } from '../pi/messages.ts';
 
 const config = loadConfig();
 if (config.mode !== 'live') {
@@ -159,6 +160,91 @@ await check('第 1 课 · 真实模型', async () => {
   await station.shutdown();
   if (station.lesson?.status !== 'done') throw new Error(`课程状态 ${station.lesson?.status}`);
   return `请求 ${metas.length} 次（${metas.map((m) => `TTFT ${m.ttftMs}ms / 总 ${m.durationMs}ms`).join('；')}）；工具 ${tools.join(' → ') || '无'}`;
+});
+
+// ───────── M2：专家看图（真实 flash 模型） ─────────
+
+function liveStation() {
+  const station = new Station(config, { hub, journal: false, clock: false, autoSpawn: false, autoHazards: false });
+  station.startFreePlay();
+  station.dispatcher.enabled = false;
+  return { station };
+}
+
+async function runMember(station: Station, id: 'navigator' | 'engineer' | 'medic', text: string) {
+  const calls: Array<{ name: string; args: any; structured?: any }> = [];
+  station.bus.subscribe((m) => {
+    if (m.t !== 'agent' || m.agentId !== id) return;
+    const ev = m.ev;
+    if (ev.type === 'tool_execution_end') {
+      const start = calls.find((c) => c.name === ev.toolName && c.structured === undefined);
+      if (start) start.structured = ev.result?.structuredContent ?? null;
+    }
+    if (ev.type === 'tool_execution_start') calls.push({ name: ev.toolName, args: ev.args });
+  });
+  const timer = setInterval(() => station.world.step(), 250);
+  try {
+    const last = await station.member(id)!.run(worldEventMessage('duty', text));
+    if (last?.stopReason === 'error') throw new Error(last.errorMessage);
+  } finally {
+    clearInterval(timer);
+  }
+  return calls;
+}
+
+await check('雷达研判 · 领航员（flash 看雷达图分辨真伪）', async () => {
+  const { station } = liveStation();
+  const w = station.world;
+  let real, fake;
+  for (let i = 0; i < 300 && !(real && fake); i++) {
+    const s = w.spawnNow();
+    const t = w.truthOf(s.id)!;
+    if (t.hoax && !fake && (!real || s.sector === real.sector)) fake = s;
+    else if (!t.hoax && !real && (!fake || s.sector === fake.sector)) real = s;
+  }
+  if (!real || !fake) throw new Error('没有生成同星区的真假信号');
+  const calls = await runMember(station, 'navigator', `扫描 ${real.sector} 区，逐个判断区内信号是真实遇险还是诱饵，用 report_back 交付，findings 每条写成「S-xx：真实」或「S-xx：诱饵」。`);
+  const report = calls.find((c) => c.name === 'report_back');
+  if (!report) throw new Error(`没有交付报告：${calls.map((c) => c.name).join(' → ')}`);
+  const text = JSON.stringify(report.args);
+  const verdict = (id: string) => new RegExp(`${id}[^"]{0,12}(诱饵|恶作剧|可疑|虚假)`).test(text) ? 'hoax' : new RegExp(`${id}[^"]{0,12}(真实|可信)`).test(text) ? 'real' : '?';
+  const got = { [real.id]: verdict(real.id), [fake.id]: verdict(fake.id) };
+  const ok = got[real.id] === 'real' && got[fake.id] === 'hoax';
+  await station.shutdown();
+  if (!ok) throw new Error(`判断有误（真实 ${real.id}、诱饵 ${fake.id}）：${JSON.stringify(got)}；工具链 ${calls.map((c) => c.name).join(' → ')}`);
+  return `正确：${real.id} 真实、${fake.id} 诱饵；工具链 ${calls.map((c) => c.name).join(' → ')}`;
+});
+
+await check('监控定位 · 工程师（flash 看监控找火点）', async () => {
+  const { station } = liveStation();
+  station.world.damageModule('hangar', 'damaged', { kind: 'fire', cell: 'C2' });
+  const calls = await runMember(station, 'engineer', '机库受损，高温告警。请诊断并处置。');
+  const vents = calls.filter((c) => c.name === 'vent_section').map((c) => c.args.cell);
+  await station.shutdown();
+  if (!vents.includes('C2')) throw new Error(`没有排空 C2：排空 ${vents.join('、') || '无'}；工具链 ${calls.map((c) => c.name).join(' → ')}`);
+  return `排空 ${vents.join('、')}；工具链 ${calls.map((c) => c.name).join(' → ')}；机库 ${station.world.module('hangar').status}`;
+});
+
+await check('体征判读 · 医疗官（flash 看波形只收治危急者）', async () => {
+  const { station } = liveStation();
+  const w = station.world;
+  let s;
+  for (let i = 0; i < 300; i++) {
+    s = w.spawnNow();
+    const t = w.truthOf(s.id)!;
+    if (!t.hoax && t.members.length >= 2 && t.members.some(Boolean) && t.members.some((x) => !x)) break;
+  }
+  w.enqueue({ type: 'dispatch', droneId: 'D-1', signalId: s!.id, route: 'direct' });
+  while (!w.snapshot().patients.length) w.step();
+  const p = w.snapshot().patients[0];
+  const truth = w.patientMembersTruth(p.id)!;
+  const critical = truth.flatMap((c, i) => (c ? [i + 1] : []));
+  const calls = await runMember(station, 'medic', `伤员组 ${p.id} 已接回，请评估并只收治危急成员。`);
+  const bedded = calls.filter((c) => c.name === 'prepare_medbay').flatMap((c) => c.args.members as number[]).sort();
+  await station.shutdown();
+  const ok = JSON.stringify(bedded) === JSON.stringify(critical);
+  if (!ok) throw new Error(`收治 ${JSON.stringify(bedded)}，实际危急 ${JSON.stringify(critical)}（共 ${truth.length} 人待评估）`);
+  return `收治 ${JSON.stringify(bedded)} = 危急 ${JSON.stringify(critical)}`;
 });
 
 const failed = results.filter((r) => !r.ok).length;

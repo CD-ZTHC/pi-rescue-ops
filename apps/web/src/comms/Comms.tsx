@@ -8,6 +8,7 @@ import { zh } from '../i18n/zh.ts';
 import { send } from '../net/client.ts';
 import { commsModel, useModels, useUi } from '../store/index.ts';
 import type { CommsEntry } from '../store/comms.ts';
+import { ToolCard } from './ToolCard.tsx';
 
 const NAMES: Record<string, string> = { commander: '北辰', navigator: '星梭', engineer: '铆钉', medic: '白鸽' };
 
@@ -20,6 +21,16 @@ export function Comms() {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [version]);
+
+  const focus = useUi((s) => s.focus);
+  useEffect(() => {
+    if (!focus) return;
+    const el = document.getElementById(`tool-${focus}`);
+    if (el) {
+      stick.current = false;
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [focus]);
 
   const entries = commsModel.entries;
   return (
@@ -59,8 +70,17 @@ const Entry = memo(function Entry({ entry }: { entry: CommsEntry; rev: number })
         </div>
       )}
       {entry.kind === 'tool' && <ToolCard e={entry} focused={focus === entry.toolCallId} />}
+      {entry.kind === 'duty' && (
+        <div className="flex items-center gap-2 text-[11.5px] text-slate-400">
+          <span style={{ color: CREW_COLORS[entry.agentId] }}>🛠</span>
+          <span>
+            值班任务 → <span style={{ color: CREW_COLORS[entry.agentId] }}>{NAMES[entry.agentId]}</span>：{entry.text}
+          </span>
+        </div>
+      )}
       {entry.kind === 'world' && (
         <div
+          onClick={() => entry.correlationId && useUi.setState({ focus: entry.correlationId })}
           className={`rounded-md px-2 py-1 text-center text-[11.5px] ${
             entry.tone === 'danger' ? 'bg-rose-500/10 text-rose-300' : entry.tone === 'warn' ? 'bg-amber-500/10 text-amber-200' : entry.tone === 'ok' ? 'bg-emerald-500/10 text-emerald-200' : 'bg-slate-500/10 text-slate-300'
           }`}
@@ -136,39 +156,6 @@ function OperatorBubble({ e }: { e: Extract<CommsEntry, { kind: 'operator' }> })
         </div>
         <div className="whitespace-pre-wrap">{e.text}</div>
       </div>
-    </div>
-  );
-}
-
-function ToolCard({ e, focused }: { e: Extract<CommsEntry, { kind: 'tool' }>; focused: boolean }) {
-  const color = CREW_COLORS[e.agentId];
-  const scan = e.name === 'scan_sector' ? (e.structured as { sector: string; signals: Array<{ id: string; clues: string[] }> } | undefined) : undefined;
-  return (
-    <div
-      className={`ml-4 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${focused ? 'border-white/70 bg-white/5' : 'border-slate-700/70 bg-slate-950/40'}`}
-      onClick={() => useUi.setState({ focus: e.toolCallId })}
-    >
-      <div className="flex items-center gap-2">
-        <span className={e.status === 'running' ? 'animate-spin' : ''} style={{ color: e.status === 'error' ? '#f43f5e' : color }}>
-          {e.status === 'running' ? '◌' : e.status === 'ok' ? '✓' : '✖'}
-        </span>
-        <span className="num text-slate-200">{e.name}</span>
-        <span className="num truncate text-slate-500">{JSON.stringify(e.args)}</span>
-        <span className="ml-auto text-slate-500">{e.status === 'running' ? zh.comms.toolRunning : e.status === 'error' ? zh.comms.toolError : ''}</span>
-      </div>
-      {e.status === 'running' && e.progress && <div className="mt-0.5 text-slate-400">{e.progress}</div>}
-      {scan ? (
-        <ul className="mt-1 space-y-0.5">
-          {scan.signals.length === 0 && <li className="text-slate-500">未发现活跃信号</li>}
-          {scan.signals.map((s) => (
-            <li key={s.id} className="text-slate-300">
-              <span className="num text-orange-300">{s.id}</span> {s.clues.join('；')}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        e.summary && e.status !== 'running' && <div className="mt-0.5 whitespace-pre-wrap text-slate-400">{e.summary}</div>
-      )}
     </div>
   );
 }

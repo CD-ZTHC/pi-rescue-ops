@@ -3,11 +3,11 @@ import { loadConfig, type Config } from '../config.ts';
 import { Station } from '../runtime/station.ts';
 
 export function offlineConfig(overrides: Partial<Config> = {}): Config {
-  return { ...loadConfig({ RESCUE_OFFLINE: '1' }), ...overrides };
+  return { ...loadConfig({ RESCUE_OFFLINE: '1', FAUX_TPS: '4000' }), ...overrides };
 }
 
 export function testStation(overrides: Partial<Config> = {}, autoSpawn = false): Station {
-  return new Station(offlineConfig(overrides), { clock: false, journal: false, autoSpawn });
+  return new Station(offlineConfig(overrides), { clock: false, journal: false, autoSpawn, autoHazards: false });
 }
 
 export function until(cond: () => boolean, timeoutMs = 5_000): Promise<void> {

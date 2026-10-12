@@ -27,7 +27,7 @@ test('preview 是纯校验：非法星区、重复扫描被拒绝，且不改变
   assert.equal(w.preview({ type: 'scan', sector: 'A' }).ok, false);
 });
 
-test('命令在下一个 tick 生效；扫描完成后揭示线索；隐藏真相不进入快照', () => {
+test('命令在下一个 tick 生效；扫描完成后标记已扫描；研判揭示线索；隐藏真相不进入快照', () => {
   const w = new World({ seed: 7, autoSpawn: false });
   const s = w.spawnNow();
   w.enqueue({ type: 'scan', sector: s.sector, correlationId: 'tc-1' });
@@ -38,9 +38,12 @@ test('命令在下一个 tick 生效；扫描完成后揭示线索；隐藏真�
   assert.ok(done && done.type === 'scan.completed');
   assert.equal(done.correlationId, 'tc-1');
   assert.deepEqual(done.signalIds, [s.id]);
-  assert.ok(w.signal(s.id)!.clues.length > 0);
+  assert.equal(w.signal(s.id)!.scanned, true);
+  assert.equal(w.signal(s.id)!.clues.length, 0, '扫描只给图像，不写文字线索');
+  assert.ok(w.inspect(s.id)!.length > 0);
+  assert.deepEqual(w.signal(s.id)!.clues, w.inspect(s.id));
   const json = JSON.stringify(w.snapshot().signals);
-  assert.ok(!/hoax|severity|truth/.test(json));
+  assert.ok(!/hoax|severity|truth|drift|members/.test(json));
 });
 
 test('信号倒计时结束后失联；真实信号计入错失', () => {

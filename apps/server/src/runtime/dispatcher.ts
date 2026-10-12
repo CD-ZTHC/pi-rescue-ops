@@ -1,29 +1,37 @@
-// 世界事件 → 指挥官唤醒策略（§4.4）。项目没有自己的调度器，完全依靠 pi 的 prompt / steer / followUp 语义。
+// 世界事件 → 船员唤醒策略（§4.4）。项目没有自己的调度器，完全依靠 pi 的 prompt / steer / followUp 语义。
 //
-// | 指挥官状态 | 事件            | 动作                     |
-// | 空闲       | 新信号          | prompt([situation])       |
-// | 运行中     | 新信号（普通）  | followUp(situation)       |
-// | 运行中     | 紧急            | steer(situation)          |
-// | 任意       | 低优先级站务    | append（下次运行时可见）  |
-import type { WorldEvent } from '@rescue/protocol';
-import { SIGNAL_KIND_NAMES } from '@rescue/protocol';
+// | 事件                    | 对象   | 动作                                          |
+// | 新信号                  | 指挥官 | 空闲 prompt / 运行中 followUp（紧急则 steer）  |
+// | 耀斑预警                | 指挥官 | 紧急：空闲 prompt / 运行中 steer               |
+// | 舱段受损                | 工程师 | 值班任务：prompt / followUp；指挥官 append     |
+// | 伤员接回                | 医疗官 | 值班任务：prompt / followUp；指挥官 append     |
+// | 救援结果、失联等站务    | 指挥官 | append（下次运行时可见，不额外发请求）         |
+//
+// M5 有了 delegate 之后，「值班任务」改为由指挥官决定是否委派（autoDuty 关闭）。
+import type { CrewId, WorldEvent } from '@rescue/protocol';
+import { MODULE_NAMES, SIGNAL_KIND_NAMES } from '@rescue/protocol';
 import type { CrewMember } from '../pi/crew.ts';
 import { situationMessage, worldEventMessage } from '../pi/messages.ts';
 import type { World } from '../world/sim.ts';
 
 export interface DispatcherDeps {
-  commander: () => CrewMember;
-  /** 判断事件是否紧急（M6 由分诊台给出；M1 一律普通） */
+  crew: (id: CrewId) => CrewMember | undefined;
+  /** 判断事件是否紧急（M6 由分诊台给出） */
   isUrgent?: (ev: WorldEvent) => boolean;
 }
 
+export type DispatchAction = 'prompt' | 'steer' | 'followUp' | 'append' | 'ignored';
+
 export interface DispatchRecord {
   event: WorldEvent['type'];
-  action: 'prompt' | 'steer' | 'followUp' | 'append' | 'ignored';
+  target?: CrewId;
+  action: DispatchAction;
 }
 
 export class Dispatcher {
   enabled = true;
+  /** 把舱段受损、伤员接回直接派给工程师 / 医疗官 */
+  autoDuty = true;
   readonly log: DispatchRecord[] = [];
   private readonly deps: DispatcherDeps;
   private world?: World;
@@ -40,30 +48,79 @@ export class Dispatcher {
     });
   }
 
-  handle(ev: WorldEvent): DispatchRecord['action'] {
-    const action = this.enabled && this.world ? this.route(ev, this.world) : 'ignored';
-    this.log.push({ event: ev.type, action });
-    if (this.log.length > 500) this.log.shift();
-    return action;
+  handle(ev: WorldEvent): DispatchAction {
+    if (!this.enabled || !this.world) {
+      this.record(ev, undefined, 'ignored');
+      return 'ignored';
+    }
+    let last: DispatchAction = 'ignored';
+    for (const [target, action] of this.route(ev, this.world)) {
+      this.record(ev, target, action);
+      last = action;
+    }
+    return last;
   }
 
-  private route(ev: WorldEvent, world: World): DispatchRecord['action'] {
-    const commander = this.deps.commander();
+  private record(ev: WorldEvent, target: CrewId | undefined, action: DispatchAction): void {
+    this.log.push({ event: ev.type, target, action });
+    if (this.log.length > 500) this.log.shift();
+  }
+
+  private route(ev: WorldEvent, world: World): Array<[CrewId, DispatchAction]> {
+    const commander = this.deps.crew('commander');
+    if (!commander) return [];
+    const note = (kind: string, text: string, cid?: string): [CrewId, DispatchAction] => {
+      commander.append(worldEventMessage(kind, text, cid));
+      return ['commander', 'append'];
+    };
+    const duty = (id: CrewId, text: string): Array<[CrewId, DispatchAction]> => {
+      const member = this.deps.crew(id);
+      if (!this.autoDuty || !member) return [];
+      return [[id, member.deliver(worldEventMessage('duty', text), 'followUp')]];
+    };
     switch (ev.type) {
       case 'signal.spawned': {
         const s = ev.signal;
         const msg = situationMessage(world.snapshot(), [`新信号 ${s.id}（${s.sector} 区${SIGNAL_KIND_NAMES[s.kind]}）`]);
-        const urgent = this.deps.isUrgent?.(ev) ?? false;
-        return commander.deliver(msg, urgent ? 'steer' : 'followUp');
+        return [['commander', commander.deliver(msg, this.deps.isUrgent?.(ev) ? 'steer' : 'followUp')]];
       }
+      case 'flare.warning': {
+        const msg = situationMessage(world.snapshot(), [`耀斑预警：${ev.sectors.join('、')} 区将在 ${ev.startTick - ev.tick} 秒后爆发`]);
+        return [['commander', commander.deliver(msg, 'steer')]];
+      }
+      case 'module.damaged':
+        return [
+          note('module.damaged', `${MODULE_NAMES[ev.module]}受损（${ev.status === 'offline' ? '离线' : '受损'}${ev.alarm ? `，${ev.alarm}` : ''}）`),
+          ...duty('engineer', `${MODULE_NAMES[ev.module]}受损${ev.alarm ? `，${ev.alarm}` : ''}。请诊断并处置。`),
+        ];
+      case 'patient.arrived':
+        return [
+          note('patient.arrived', `伤员组 ${ev.patient.id} 已接回（${ev.patient.count} 人，来自 ${ev.patient.signalId}）`),
+          ...duty('medic', `伤员组 ${ev.patient.id} 已接回：${ev.patient.count} 人，其中 ${ev.patient.members.length} 人状况不明，${ev.patient.deadlineTick - ev.tick} 秒内需决定是否收治。`),
+        ];
+      case 'drone.arrived': {
+        const text =
+          ev.outcome === 'rescued'
+            ? `${ev.droneId} 抵达 ${ev.signalId}，救出 ${ev.survivors} 人，正在返航`
+            : ev.outcome === 'hoax'
+              ? `${ev.droneId} 抵达 ${ev.signalId}：现场只有一个自动信标，是诱饵，燃料白白消耗`
+              : `${ev.droneId} 抵达 ${ev.signalId}：目标已失联`;
+        return [note('drone.arrived', text, ev.correlationId)];
+      }
+      case 'drone.returned':
+        return [note('drone.returned', `${ev.droneId} 已返港${ev.survivors ? `，带回 ${ev.survivors} 人` : ''}${ev.damaged ? '；机体受损，需检修 60 秒' : ''}`, ev.correlationId)];
+      case 'drone.damaged':
+        return [note('drone.damaged', `${ev.droneId} 在耀斑中受损`)];
       case 'signal.lost':
-        commander.append(worldEventMessage('signal.lost', `信号 ${ev.signalId} 已失联（倒计时结束）`));
-        return 'append';
+        return [note('signal.lost', `信号 ${ev.signalId} 已失联（倒计时结束）`)];
+      case 'module.repaired':
+        return [note('module.repaired', `${MODULE_NAMES[ev.module]}已修复`)];
+      case 'patient.lost':
+        return [note('patient.lost', `伤员 ${ev.patientId}-${ev.member} 因未及时收治而死亡`)];
       case 'shift.ended':
-        commander.append(worldEventMessage('shift.ended', `班次结束：获救 ${ev.score.rescued}，错失 ${ev.score.missed}，得分 ${ev.score.total}`));
-        return 'append';
+        return [note('shift.ended', `班次结束：获救 ${ev.score.rescued}，错失 ${ev.score.missed}，得分 ${ev.score.total}`)];
       default:
-        return 'ignored';
+        return [];
     }
   }
 }

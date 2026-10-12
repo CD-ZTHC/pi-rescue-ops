@@ -88,6 +88,7 @@ export function Inspector() {
   const width = Math.max(100, size.w - GUTTER - 8);
   const x = (t: number) => GUTTER + ((t - start) / span) * width;
   const onDuty = new Set(crew.map((c) => c.id));
+  const sequentialTools = useMemo(() => new Set(crew.flatMap((c) => c.tools.filter((t) => t.executionMode === 'sequential').map((t) => t.name))), [crew]);
 
   const lanes = useMemo(() => {
     let y = 26;
@@ -175,7 +176,7 @@ export function Inspector() {
             {lane.active &&
               visible
                 .filter((r) => r.agentId === lane.id)
-                .map((run) => <RunShape key={run.runId} run={run} y={lane.y} h={lane.h} x={x} now={now} focus={focus} />)}
+                .map((run) => <RunShape key={run.runId} run={run} y={lane.y} h={lane.h} x={x} now={now} focus={focus} sequentialTools={sequentialTools} />)}
           </g>
         ))}
         {visible.length === 0 && (
@@ -215,7 +216,7 @@ export function Legend() {
   );
 }
 
-function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) => number; now: number; focus?: string }) {
+function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) => number; now: number; focus?: string; sequentialTools: Set<string> }) {
   const { run, y, h, x, now } = props;
   const color = CREW_COLORS[run.agentId];
   const x0 = x(run.startedAt);
@@ -225,7 +226,7 @@ function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) =>
     <g>
       <rect x={x0} y={y + 4} width={x1 - x0} height={h - 8} rx={7} fill={color} fillOpacity={0.05} stroke={outcomeColor} strokeOpacity={0.55} />
       {run.turns.map((turn, i) => (
-        <TurnShape key={i} turn={turn} y={y} x={x} now={now} color={color} focus={props.focus} />
+        <TurnShape key={i} turn={turn} y={y} x={x} now={now} color={color} focus={props.focus} sequentialTools={props.sequentialTools} />
       ))}
       {(run.queue.steer > 0 || run.queue.followUp > 0) && (
         <g transform={`translate(${x1 + 4}, ${y + 8})`}>
@@ -245,8 +246,10 @@ function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) =>
   );
 }
 
-function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number; now: number; color: string; focus?: string }) {
+function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number; now: number; color: string; focus?: string; sequentialTools: Set<string> }) {
   const { turn, y, x, now, color } = props;
+  // 批次里只要有一个 sequential 工具，整批串行（§5.4）
+  const serialBy = turn.tools.length > 1 ? turn.tools.find((t) => props.sequentialTools.has(t.name))?.name : undefined;
   const tx0 = x(turn.start);
   const tx1 = Math.max(tx0 + 2, x(turn.end ?? now));
   const req = turn.request;
@@ -265,9 +268,11 @@ function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number;
   return (
     <g>
       <rect x={tx0} y={y + 8} width={tx1 - tx0} height={12} rx={3} fill={color} fillOpacity={turn.index % 2 ? 0.1 : 0.18} />
-      <text x={tx0 + 3} y={y + 17.5} fontSize={9} fill={color} opacity={0.9} className="num">
-        T{turn.index + 1}
-      </text>
+      {tx1 - tx0 > 16 && (
+        <text x={tx0 + 3} y={y + 17.5} fontSize={9} fill={color} opacity={0.9} className="num">
+          T{turn.index + 1}
+        </text>
+      )}
       {req && <RequestShape req={req} y={y + REQ_Y} x={x} now={now} color={color} />}
       {turn.tools.map((tool, i) => (
         <ToolShape key={tool.toolCallId} tool={tool} y={y + TOOL_Y + toolRows[i] * (TOOL_H + TOOL_GAP)} x={x} now={now} color={color} focused={props.focus === tool.toolCallId} />
@@ -275,6 +280,11 @@ function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number;
       {turn.hooks.map((m, i) => (
         <Diamond key={i} cx={x(m.at)} cy={y + 14} mark={m} />
       ))}
+      {serialBy && turn.tools[0] && (
+        <text x={x(turn.tools[0].start)} y={y + TOOL_Y + rows.length * (TOOL_H + TOOL_GAP) + 9} fontSize={9.5} fill="#94a3b8">
+          串行：因 {serialBy}
+        </text>
+      )}
     </g>
   );
 }
@@ -321,9 +331,11 @@ function ToolShape(props: { tool: ToolView; y: number; x: (t: number) => number;
       {tool.updates.map((u, i) => (
         <line key={i} x1={x(u.at)} x2={x(u.at)} y1={y + 1} y2={y + TOOL_H - 1} stroke="#fff" strokeOpacity={0.7} />
       ))}
-      <text x={sx + 4} y={y + 8.8} fontSize={9} fill="#f8fafc">
-        {tool.name}
-      </text>
+      {w > tool.name.length * 5.6 + 8 && (
+        <text x={sx + 4} y={y + 8.8} fontSize={9} fill="#f8fafc">
+          {tool.name}
+        </text>
+      )}
       {tool.hooks.map((m, i) => (
         <Diamond key={i} cx={x(m.at)} cy={y + TOOL_H / 2} mark={m} small />
       ))}

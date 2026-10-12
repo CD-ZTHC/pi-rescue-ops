@@ -1,72 +1,96 @@
-// 指挥官工具（M1 简版）：stand_by、scan_sector。
-// M2 起 scan_sector 归领航员所有，并返回雷达成像。
+// 指挥官工具：dispatch_drone（S）、allocate_fuel（S）、end_watch（S ⏹）、stand_by（S ⏹）。
+// 审批（⚠）与预算拦截在 M3 由 beforeToolCall 策略链实现，这里只做世界的 preview 校验。
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { Type, type Static } from 'typebox';
-import { SECTOR_IDS, type SectorId, type WorldEvent } from '@rescue/protocol';
-import type { World } from '../../world/sim.ts';
+import type { WorldEvent } from '@rescue/protocol';
+import { inspectSignalTool, plotCourseTool, scanSectorTool } from './navigator.ts';
+import { DroneParam, failure, normalizeDrone, normalizeSignal, prepare, SignalParam, text, waitForWorldEvent, type ToolDeps } from './shared.ts';
 
-export interface ToolDeps {
-  world: World;
-}
-
-const text = (t: string) => ({ type: 'text' as const, text: t });
-
-const SectorParam = Type.Union(SECTOR_IDS.map((id) => Type.Literal(id)), { description: '星区编号 A–F' });
-
-const ScanParams = Type.Object({ sector: SectorParam });
-const ScanOutput = Type.Object({
-  sector: Type.String(),
-  ticks: Type.Number(),
-  signals: Type.Array(Type.Object({ id: Type.String(), kind: Type.String(), survivors: Type.Number(), clues: Type.Array(Type.String()) })),
+const DispatchParams = Type.Object({
+  droneId: DroneParam,
+  signalId: SignalParam,
+  route: Type.Optional(Type.Union([Type.Literal('direct'), Type.Literal('safe')], { description: 'direct 直飞（默认）/ safe 绕开危险区' })),
 });
-type ScanOutput = Static<typeof ScanOutput>;
+const DispatchOutput = Type.Object({
+  accepted: Type.Boolean(),
+  droneId: Type.String(),
+  signalId: Type.String(),
+  route: Type.String(),
+  fuel: Type.Number(),
+  eta: Type.Number(),
+  hazardous: Type.Boolean(),
+  departTick: Type.Number(),
+});
 
-/** 把「a区」「Ｂ」「sector c」之类的写法归一化为 A–F（prepareArguments 示例，第 3 课） */
-export function normalizeSector(raw: unknown): unknown {
-  if (typeof raw !== 'string') return raw;
-  const half = raw.replace(/[Ａ-Ｚａ-ｚ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-  const m = half.toUpperCase().match(/[A-F]/);
-  return m ? m[0] : raw;
-}
-
-export function scanSectorTool(deps: ToolDeps): AgentTool<typeof ScanParams> {
+export function dispatchDroneTool(deps: ToolDeps): AgentTool<typeof DispatchParams> {
   return {
-    name: 'scan_sector',
-    label: '扫描星区',
-    description: '对一个星区做主动扫描，耗时 3–6 秒，返回该区活跃信号及线索（用于判断信号真伪）。',
-    parameters: ScanParams,
-    outputSchema: ScanOutput,
-    executionMode: 'parallel',
-    prepareArguments: (args) => {
-      const a = (args ?? {}) as Record<string, unknown>;
-      return { ...a, sector: normalizeSector(a.sector) } as Static<typeof ScanParams>;
-    },
-    async execute(toolCallId, { sector }, signal, onUpdate) {
+    name: 'dispatch_drone',
+    label: '派出无人机',
+    description: '派一架在港无人机前往信号救援。返回的是「已受理」回执；抵达与救援结果会以【站务】消息告知。',
+    parameters: DispatchParams,
+    outputSchema: DispatchOutput,
+    executionMode: 'sequential',
+    prepareArguments: prepare<Static<typeof DispatchParams>>({ droneId: normalizeDrone, signalId: normalizeSignal }),
+    async execute(toolCallId, { droneId, signalId, route = 'direct' }, signal) {
       const world = deps.world;
-      const accepted = world.enqueue({ type: 'scan', sector, correlationId: toolCallId });
-      if (!accepted.ok) {
-        return { content: [text(`扫描未受理：${accepted.reason}`)], details: { reason: accepted.reason }, isError: true };
-      }
-      onUpdate?.({ content: [text(`${sector} 区扫描已受理，预计 ${accepted.etaTicks} 秒`)], details: { phase: 'accepted', eta: accepted.etaTicks } });
-      const started = world.tick;
-      const done = await waitForWorldEvent(
+      const accepted = world.enqueue({ type: 'dispatch', droneId, signalId, route, correlationId: toolCallId });
+      if (!accepted.ok) return failure(`出动未受理：${accepted.reason}`, { droneId, signalId });
+      // 命令在下一个 tick 生效：等到它真正出发，回执里的数字才是事实
+      const ev = await waitForWorldEvent(
         world,
-        (ev): ev is Extract<WorldEvent, { type: 'scan.completed' }> => ev.type === 'scan.completed' && ev.correlationId === toolCallId,
+        (e): e is Extract<WorldEvent, { type: 'drone.dispatched' }> => e.type === 'drone.dispatched' && e.correlationId === toolCallId,
         signal,
       );
-      const signals = done.signalIds
-        .map((id) => world.signal(id))
-        .filter((s) => s !== undefined)
-        .map((s) => ({ id: s.id, kind: s.kind, survivors: s.survivors, clues: s.clues }));
-      const result: ScanOutput = { sector, ticks: done.tick - started, signals };
-      const lines = signals.length
-        ? signals.map((s) => `${s.id}：${s.clues.join('；')}`)
-        : ['未发现活跃信号'];
+      const receipt = { accepted: true, droneId, signalId, route, fuel: ev.fuel, eta: ev.eta, hazardous: ev.hazardous, departTick: ev.tick };
       return {
-        content: [text(`${sector} 区扫描完成（${result.ticks} 秒）。\n${lines.join('\n')}`)],
-        details: { sector },
-        structuredContent: result,
+        content: [text(`${droneId} 已出发前往 ${signalId}（${route === 'safe' ? '绕行' : '直飞'}），预计 ${ev.eta} 秒抵达，消耗燃料 ${ev.fuel}${ev.hazardous ? '，航线经过危险区' : ''}。`)],
+        details: receipt,
+        structuredContent: receipt,
       };
+    },
+  };
+}
+
+const AllocateParams = Type.Object({ signalId: SignalParam, amount: Type.Integer({ minimum: 1, maximum: 60, description: '预留燃料量' }) });
+
+export function allocateFuelTool(deps: ToolDeps): AgentTool<typeof AllocateParams> {
+  return {
+    name: 'allocate_fuel',
+    label: '预留燃料',
+    description: '为某个信号预留燃料，其他出动不能动用这部分。',
+    parameters: AllocateParams,
+    outputSchema: Type.Object({ signalId: Type.String(), amount: Type.Number(), fuelAvailable: Type.Number() }),
+    executionMode: 'sequential',
+    prepareArguments: prepare<Static<typeof AllocateParams>>({ signalId: normalizeSignal }),
+    async execute(_id, { signalId, amount }) {
+      const world = deps.world;
+      const accepted = world.enqueue({ type: 'allocate', signalId, amount, correlationId: _id });
+      if (!accepted.ok) return failure(`预留未受理：${accepted.reason}`, { signalId, amount });
+      const fuelAvailable = world.availableFuel() - amount;
+      return {
+        content: [text(`已为 ${signalId} 预留燃料 ${amount}，其余可用 ${fuelAvailable}。`)],
+        details: { signalId, amount },
+        structuredContent: { signalId, amount, fuelAvailable },
+      };
+    },
+  };
+}
+
+const EndParams = Type.Object({ report: Type.String({ description: '交班报告：获救、错失、教训，三五句即可' }) });
+
+export function endWatchTool(deps: ToolDeps): AgentTool<typeof EndParams> {
+  return {
+    name: 'end_watch',
+    label: '交班',
+    description: '提前结束本班次并提交交班报告。',
+    parameters: EndParams,
+    outputSchema: Type.Object({ report: Type.String(), tick: Type.Number() }),
+    executionMode: 'sequential',
+    async execute(_id, { report }) {
+      const world = deps.world;
+      const accepted = world.enqueue({ type: 'endWatch', report });
+      if (!accepted.ok) return failure(`交班未受理：${accepted.reason}`);
+      return { content: [text('交班报告已提交。')], details: { report }, structuredContent: { report, tick: world.tick }, terminate: true };
     },
   };
 }
@@ -77,7 +101,7 @@ export function standByTool(): AgentTool<typeof StandByParams> {
   return {
     name: 'stand_by',
     label: '待命',
-    description: '本轮无需行动时调用，说明理由后结束本轮。',
+    description: '本轮无需行动（或已安排好）时调用，说明理由后结束本轮。',
     parameters: StandByParams,
     outputSchema: Type.Object({ reason: Type.String() }),
     executionMode: 'sequential',
@@ -87,34 +111,18 @@ export function standByTool(): AgentTool<typeof StandByParams> {
   };
 }
 
-export function waitForWorldEvent<T extends WorldEvent>(
-  world: World,
-  match: (ev: WorldEvent) => ev is T,
-  signal?: AbortSignal,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const off = world.subscribe(({ events }) => {
-      const hit = events.find(match);
-      if (hit) {
-        cleanup();
-        resolve(hit);
-      }
-    });
-    const onAbort = () => {
-      cleanup();
-      reject(new Error('已中止'));
-    };
-    const cleanup = () => {
-      off();
-      signal?.removeEventListener('abort', onAbort);
-    };
-    if (signal?.aborted) return onAbort();
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
+/**
+ * M2 的指挥官工具表。scan_sector / inspect_signal / plot_course 暂借领航员的实现：
+ * M5 有了 delegate 之后，scan_sector 只留给能看图的领航员。
+ */
 export function commanderTools(deps: ToolDeps): AgentTool<any>[] {
-  return [scanSectorTool(deps), standByTool()];
+  return [
+    scanSectorTool(deps),
+    inspectSignalTool(deps),
+    plotCourseTool(deps),
+    dispatchDroneTool(deps),
+    allocateFuelTool(deps),
+    endWatchTool(deps),
+    standByTool(),
+  ];
 }
-
-export type { SectorId };

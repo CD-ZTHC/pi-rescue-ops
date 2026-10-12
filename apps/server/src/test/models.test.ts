@@ -49,3 +49,13 @@ test('探针记录排队时间与图片数', async () => {
   await s.result();
   assert.equal((timing as { images: number }).images, 1);
 });
+
+test('离线大脑：多名船员同时请求，每个请求都拿到回复', async () => {
+  const hub = createModelHub(offlineConfig({ maxConcurrency: 4 }));
+  hub.setOfflineBrain(() => fauxAssistantMessage('ok'));
+  const streamFn = hub.createStreamFn();
+  const results = await Promise.all(
+    Array.from({ length: 4 }, async () => (await streamFn(hub.chat('glm-5.3-flash'), normalizeContext({ messages: [{ role: 'user', content: 'hi', timestamp: 0 }] }))).result()),
+  );
+  assert.deepEqual(results.map((r) => r.stopReason), ['stop', 'stop', 'stop', 'stop']);
+});

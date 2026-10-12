@@ -1,8 +1,8 @@
 // CrewMember：组装一个船员的 Agent 与全部 hook（§5.1）。
 import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { getCurrentSystemPrompt, getCurrentTools, isRetryableAssistantError, type AssistantMessage, type Tool } from '@earendil-works/pi-ai';
-import type { CrewId, CrewView } from '@rescue/protocol';
-import { CREW_COLORS } from '@rescue/protocol';
+import type { CrewId, CrewView, ToolMeta } from '@rescue/protocol';
+import { CREW_COLORS, TOOL_FLAGS } from '@rescue/protocol';
 import type { Bus } from '../runtime/bus.ts';
 import type { World } from '../world/sim.ts';
 import { convertToLlm } from './messages.ts';
@@ -39,7 +39,7 @@ export interface CrewMember {
   deliver(messages: AgentMessage | AgentMessage[], mode: Delivery): 'prompt' | 'steer' | 'followUp';
   /** 运行并等待结束，返回本轮最后一条 assistant 消息 */
   run(messages: AgentMessage | AgentMessage[]): Promise<AssistantMessage | undefined>;
-  /** 空闲时直接追加到上下文（不触发运行），下次运行时模型会看到 */
+  /** 追加到上下文但不触发运行：空闲时立即追加；运行中先暂存，运行结束后追加（避免 followUp 引发额外请求） */
   append(message: AgentMessage): void;
   abort(): void;
   view(): CrewView;
@@ -54,6 +54,13 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
   const base = renderBaseSystem(spec, deps.world.snapshot());
   let lastError: string | undefined;
   let running = false;
+  let deferred: AgentMessage[] = [];
+  const toolMeta: ToolMeta[] = tools.map((t) => ({
+    name: t.name,
+    label: t.label,
+    executionMode: t.executionMode,
+    flags: [...(t.outputSchema ? ['OS'] : []), ...(TOOL_FLAGS[t.name] ?? [])],
+  }));
 
   const budget = turnBudget(spec.maxRequestsPerRun, (hook, decision, durationMs) =>
     deps.bus.app({ kind: 'hook', agentId: spec.id, runId: observer.runId, hook, decision, durationMs }),
@@ -149,10 +156,14 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
       running = true;
       return runToEnd(() => agent.prompt(messages)).finally(() => {
         running = agent.state.isStreaming;
+        if (!running && deferred.length) {
+          agent.state.messages = [...agent.state.messages, ...deferred];
+          deferred = [];
+        }
       });
     },
     append(message) {
-      if (member.isRunning) agent.followUp(message);
+      if (member.isRunning) deferred.push(message);
       else agent.state.messages = [...agent.state.messages, message];
     },
     abort() {
@@ -169,6 +180,7 @@ export function createCrewMember(spec: CrewSpec, deps: CrewDeps): CrewMember {
         thinkingLevel: agent.state.thinkingLevel,
         status: member.isRunning ? 'running' : lastError ? 'error' : 'idle',
         vision: model.input.includes('image'),
+        tools: toolMeta,
       };
     },
     async contextView() {

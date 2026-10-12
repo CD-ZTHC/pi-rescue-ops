@@ -167,7 +167,7 @@ export function createModelHub(config: Config): ModelHub {
   const faux = fauxProvider({
     provider: FAUX_PROVIDER,
     models: ids.map((m) => ({ id: m.id, reasoning: true, input: m.vision ? ['text', 'image'] : ['text'] })),
-    tokensPerSecond: 60,
+    tokensPerSecond: config.fauxTokensPerSecond,
   });
   models.setProvider(faux.provider);
 
@@ -206,9 +206,8 @@ export function createModelHub(config: Config): ModelHub {
           images: countImages(context.messages),
           model: model.id,
         });
-        if (model.provider === FAUX_PROVIDER && offlineBrain && faux.getPendingResponseCount() === 0) {
-          faux.appendResponses([offlineBrain]);
-        }
+        // 离线自由模式：每个请求排入一个大脑工厂（多名船员并发请求时，按「队列为空才补」会出现竞态）
+        if (model.provider === FAUX_PROVIDER && offlineBrain) faux.appendResponses([offlineBrain]);
         const stream = models.streamSimple(model, context, options);
         stream.result().then(release, release);
         return stream;

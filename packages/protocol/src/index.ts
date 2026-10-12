@@ -17,7 +17,30 @@ export interface CrewView {
   thinkingLevel: string;
   status: 'idle' | 'running' | 'error';
   vision: boolean;
+  tools: ToolMeta[];
 }
+
+export interface ToolMeta {
+  name: string;
+  label: string;
+  executionMode?: 'parallel' | 'sequential';
+  /** §5.4 记号：OS / ↻ / IMG / ⚠ / ⏹ */
+  flags: string[];
+}
+
+/** §5.4 中无法从工具定义推导的记号（OS 由 outputSchema 推导） */
+export const TOOL_FLAGS: Record<string, string[]> = {
+  scan_sector: ['↻', 'IMG'],
+  compare_frames: ['IMG'],
+  inspect_camera: ['IMG'],
+  read_vitals: ['IMG'],
+  repair_module: ['↻'],
+  dispatch_drone: ['⚠'],
+  vent_section: ['⚠'],
+  end_watch: ['⏹'],
+  stand_by: ['⏹'],
+  report_back: ['⏹'],
+};
 
 /** message_update 合批后发送的增量：去掉 partial 快照，只保留增量本身 */
 export type WireDelta =

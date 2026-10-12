@@ -1,6 +1,7 @@
 // 页面布局（§3.5）：三栏可拖动；窄屏（< 1280px）时 ② 和 ③ 合并成标签页。
 import { useEffect, useRef, useState } from 'react';
 import { Comms } from '../comms/Comms.tsx';
+import { Lightbox } from '../comms/Lightbox.tsx';
 import { zh } from '../i18n/zh.ts';
 import { Inspector, InspectorLegend } from '../inspector/Inspector.tsx';
 import { LessonPanel } from '../lessons/LessonPanel.tsx';
@@ -118,6 +119,7 @@ export function App() {
       </div>
       <ContextDrawer />
       <Toasts />
+      <Lightbox />
     </>
   );
 }

@@ -1,6 +1,6 @@
 # Pi Rescue Ops · 深空救援指挥舱
 
-以学习 pi-agent-core 1.1 / pi-ai 1.1 为目的的项目。设计见 [docs/design.md](docs/design.md)。当前进度：**M1 骨架**。
+以学习 pi-agent-core 1.1 / pi-ai 1.1 为目的的项目。设计见 [docs/design.md](docs/design.md)。当前进度：**M2 工具**（M1 骨架已完成）。
 
 ## 运行
 
@@ -39,6 +39,30 @@ mise run dev          # 后端 ws://localhost:8787/ws + 前端 http://localhost:
 | 14 | 第 1、2 课的 faux 脚本（同时是回归测试） | `packages/lessons` |
 
 另外还有零依赖 PNG 编码器（`world/render/png.ts`、`raster.ts`），冒烟测试的看图检查要用到它，M2 的三种图也将基于它实现。
+
+## M2 已完成
+
+| 内容 | 位置 |
+|---|---|
+| 世界：无人机飞行（贝塞尔航线）、抵达与救援、诱饵、返港；燃料与预留；耀斑（提前 60 秒预警、危险区、舱段事故、无人机受损）；舱段火情 / 烟雾 / 破口与修复；医疗舱伤员组、期限与床位 | `apps/server/src/world/` |
+| 三种图 + 5×7 点阵字体：雷达成像（热斑 + 碎片尾迹 vs 干净亮点、耀斑噪声与伪热斑、部分扫描）、两帧精扫、舱段监控（A1–D3 网格）、体征波形 | `world/render/` |
+| §5.4 工具（除 M5/M6 的 delegate、codemode、MCP）：并行 / 串行、`prepareArguments`、`outputSchema`、`onUpdate`、`isError` 部分结果、`terminate` | `pi/tools/` |
+| 四名船员都是独立 Agent（专家用 flash，可直接对话）；舱段受损、伤员接回作为「值班任务」直接派给工程师 / 医疗官 | `pi/roster.ts`、`runtime/dispatcher.ts` |
+| 离线大脑覆盖四名船员；工程师离线时解码自己的 PNG 找火点 | `pi/offline-brain.ts` |
+| 第 3–6 课 | `packages/lessons` |
+| 前端：无人机插值飞行 + 拖尾 + 航线、耀斑区动画、信号终态、点无人机联动到工具调用；频道里的雷达 / 监控 / 体征缩略图与放大、进度条、按工具定制的结构化卡片；Inspector「串行：因 xxx」 | `apps/web/src/` |
+
+### M2 实测（`mise run smoke:live` 11/11 通过）
+
+- glm-5.3-flash 三种图都能看懂：雷达图正确区分真实与诱饵（会主动调用 `compare_frames` 看两帧），监控画面找到 C2 火点并只排空这一格，体征波形只收治了危急成员。
+- 第 1 课用真实指挥官跑：它自己走完了 `inspect_signal → scan_sector → plot_course → dispatch_drone → stand_by`。
+- 这一轮 flash 的 `thinking: off` 返回 `usage.reasoning=0`，上一轮是 19：网关对 disabled 的处理并不稳定。
+
+### 与设计的差异
+
+- 设计里「进入耀斑区燃料翻倍」改为「基础量 ×（1 + 危险区航程占比）」：直飞是径向的，永远不会离开目标星区，原规则下 `safe` 航线没有意义。现在绕行借道相邻星区、最后才切入，用航程换更少的暴露。
+- M2 中专家还不是指挥官的工具（delegate 在 M5），而是独立 Agent：主管可以直接对话，舱段受损 / 伤员接回由调度器直接派活（`Dispatcher.autoDuty`）。指挥官暂借 `scan_sector`（看不见图，正好演示纯文本降级）、`inspect_signal`、`plot_course`。
+- 运行中到达的低优先级站务不再走 `followUp`（会多发请求），而是暂存到运行结束后再追加到上下文。
 
 ## M1 实测结论（2026-10-12，`mise run smoke:live` 8/8 通过）
 
