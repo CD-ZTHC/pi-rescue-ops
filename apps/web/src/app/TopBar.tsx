@@ -26,7 +26,7 @@ function Stat(props: { label: string; children: React.ReactNode; title?: string 
 
 export function TopBar() {
   const world = useWorld((s) => s.world);
-  const { info, connection, crew, lesson } = useUi();
+  const { info, connection, crew, lesson, replay } = useUi();
   useModels((s) => s.runs);
   if (!world) return <div className="panel h-11 shrink-0" />;
   const docked = world.drones.filter((d) => d.status === 'docked').length;
@@ -95,6 +95,11 @@ export function TopBar() {
             <span className="text-slate-400">{c.status === 'running' ? '运行中' : c.status === 'error' ? '失联' : '待命'}</span>
           </span>
         ))}
+        {replay && !lesson && (
+          <span className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[12px] ${replay.status === 'diverged' ? 'bg-rose-500/20 text-rose-100' : 'bg-violet-500/15 text-violet-200'}`}>
+            📼 回放 {replay.matched}/{replay.total}
+          </span>
+        )}
         {lesson && (
           <span className="whitespace-nowrap rounded-md bg-violet-500/15 px-2 py-0.5 text-[12px] text-violet-200">
             第 {lesson.meta.index} 课 · {lesson.meta.title}

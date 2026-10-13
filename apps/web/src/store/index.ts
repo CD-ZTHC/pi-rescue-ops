@@ -46,6 +46,9 @@ interface UiSlice {
   benchOpen: boolean;
   policyOpen: boolean;
   spansOpen: boolean;
+  filesOpen: boolean;
+  files?: Extract<AppEvent, { kind: 'files' }>;
+  replay?: Extract<AppEvent, { kind: 'replay' }>;
   spans?: Extract<AppEvent, { kind: 'telemetry' }>['spans'];
   /** Inspector 里点开的请求（第 21 课：耗时构成与原始 chunk） */
   requestDetail?: import('./runs.ts').RequestView & { agentId: CrewId };
@@ -69,6 +72,7 @@ export const useUi = create<UiSlice>(() => ({
   benchOpen: false,
   policyOpen: false,
   spansOpen: false,
+  filesOpen: false,
 }));
 
 /** 服务端墙钟与本地时钟的偏差：取观测到的最小值（网络延迟只会让差值变大） */
@@ -128,7 +132,8 @@ export function ingest(msg: ServerMsg): void {
         runsModel.apply(h);
         commsModel.apply(h);
         // 状态型的应用事件也要回放（提示类、审批类不回放，避免弹出过期的提醒）
-        if (h.t === 'app' && (h.ev.kind === 'context.meter' || h.ev.kind === 'queue' || h.ev.kind === 'crew')) applyUi(h.ev);
+        if (h.t === 'app' && (h.ev.kind === 'context.meter' || h.ev.kind === 'queue' || h.ev.kind === 'crew' || h.ev.kind === 'policy')) applyUi(h.ev);
+        if (h.t === 'app' && h.ev.kind === 'replay') useUi.setState({ replay: h.ev });
         observeClock(h.at);
       }
       dirtyRuns = dirtyComms = true;
@@ -155,15 +160,16 @@ export function ingest(msg: ServerMsg): void {
   }
 }
 
+function applyLesson(ev: Extract<AppEvent, { kind: 'lesson' }>): void {
+  useUi.setState({ lesson: ev.lesson ? { meta: ev.lesson, mode: ev.mode, status: ev.status, note: ev.note } : null });
+  if (ev.status === 'done' && ev.lesson) toast('info', `第 ${ev.lesson.index} 课完成${ev.note ? `：${ev.note}` : ''}`);
+  if (ev.status === 'error') toast('error', `课程出错：${ev.note ?? ''}`);
+}
+
 function applyUi(ev: AppEvent): void {
   switch (ev.kind) {
     case 'crew':
       useUi.setState((s) => ({ crew: mergeCrew(s.crew, ev.crew) }));
-      return;
-    case 'lesson':
-      useUi.setState({ lesson: ev.lesson ? { meta: ev.lesson, mode: ev.mode, status: ev.status, note: ev.note } : null });
-      if (ev.status === 'done' && ev.lesson) toast('info', `第 ${ev.lesson.index} 课完成`);
-      if (ev.status === 'error') toast('error', `课程出错：${ev.note ?? ''}`);
       return;
     case 'notice':
       toast(ev.level, ev.text);
@@ -189,6 +195,19 @@ function applyUi(ev: AppEvent): void {
       return;
     case 'queue':
       useUi.setState((s) => ({ queues: { ...s.queues, [ev.agentId]: ev } }));
+      return;
+    case 'files':
+      useUi.setState({ files: ev });
+      return;
+    case 'replay':
+      useUi.setState({ replay: ev });
+      if (ev.status === 'diverged') toast('warn', ev.note ?? '回放出现分歧');
+      if (ev.status === 'done') toast('info', `回放完成：工具调用吻合 ${ev.matched}/${ev.total}`);
+      if (ev.status === 'error') toast('error', `回放失败：${ev.note ?? ''}`);
+      return;
+    case 'lesson':
+      if (ev.status === 'done' && !ev.lesson) useUi.setState({ replay: undefined });
+      applyLesson(ev);
       return;
     case 'telemetry':
       useUi.setState({ spans: ev.spans });

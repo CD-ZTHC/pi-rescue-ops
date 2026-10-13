@@ -88,6 +88,24 @@ export function BottomBar() {
         🧪 试验台
       </button>
       <button
+        className="shrink-0 rounded-md border border-slate-600 px-2 py-1 text-slate-300 hover:text-white"
+        onClick={() => {
+          useUi.setState((s) => ({ spansOpen: !s.spansOpen }));
+          send({ t: 'telemetry.request' });
+        }}
+      >
+        🌲 Span 树
+      </button>
+      <button
+        className="shrink-0 rounded-md border border-slate-600 px-2 py-1 text-slate-300 hover:text-white"
+        onClick={() => {
+          useUi.setState((s) => ({ filesOpen: !s.filesOpen }));
+          send({ t: 'files.list' });
+        }}
+      >
+        📼 录制
+      </button>
+      <button
         className="shrink-0 rounded-md border border-cyan-500/40 px-2.5 py-1 text-cyan-200 hover:bg-cyan-500/10"
         onClick={() => {
           useUi.setState({ contextOpen: true });

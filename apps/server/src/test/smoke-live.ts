@@ -217,6 +217,7 @@ await check('雷达研判 · 领航员（flash 看雷达图分辨真伪）', asy
 
 await check('监控定位 · 工程师（flash 看监控找火点）', async () => {
   const { station } = liveStation();
+  station.setPolicy('autoApprove', true); // 这里考的是看图，不是审批（审批在第 7 课）
   station.world.damageModule('hangar', 'damaged', { kind: 'fire', cell: 'C2' });
   const calls = await runMember(station, 'engineer', '机库受损，高温告警。请诊断并处置。');
   const vents = calls.filter((c) => c.name === 'vent_section').map((c) => c.args.cell);
@@ -245,6 +246,54 @@ await check('体征判读 · 医疗官（flash 看波形只收治危急者）', 
   const ok = JSON.stringify(bedded) === JSON.stringify(critical);
   if (!ok) throw new Error(`收治 ${JSON.stringify(bedded)}，实际危急 ${JSON.stringify(critical)}（共 ${truth.length} 人待评估）`);
   return `收治 ${JSON.stringify(bedded)} = 危急 ${JSON.stringify(critical)}`;
+});
+
+// ───────── M3–M6：委派、分诊、脚本编排（真实模型） ─────────
+
+async function commanderRun(station: Station, text: string) {
+  const calls: string[] = [];
+  station.bus.subscribe((m) => m.t === 'agent' && m.ev.type === 'tool_execution_start' && calls.push(`${m.agentId}:${m.ev.toolName}`));
+  const timer = setInterval(() => station.world.step(), 250);
+  try {
+    const last = await station.commander.run(worldEventMessage('duty', text));
+    if (last?.stopReason === 'error') throw new Error(last.errorMessage);
+  } finally {
+    clearInterval(timer);
+  }
+  return calls;
+}
+
+await check('委派 · 指挥官（glm-5.3）把看图交给领航员（flash）', async () => {
+  const { station } = liveStation();
+  station.setPolicy('autoApprove', true);
+  const s = station.world.spawnNow();
+  const calls = await commanderRun(station, `${s.sector} 区出现信号 ${s.id}，你看不见雷达图。请委派能看图的船员扫描并判断真伪，然后待命。`);
+  await station.shutdown();
+  if (!calls.includes('commander:delegate')) throw new Error(`没有委派：${calls.join(' → ')}`);
+  if (!calls.includes('navigator:scan_sector')) throw new Error(`领航员没有扫描：${calls.join(' → ')}`);
+  return calls.join(' → ');
+});
+
+await check('分诊台 · 自定义分类器（flash 工具采样 k=3）', async () => {
+  const { station } = liveStation();
+  const s = station.world.spawnNow();
+  station.hub.triageSamples = 3;
+  const { triageSignal } = await import('../pi/triage.ts');
+  const { radioTranscript } = await import('../world/spawner.ts');
+  const view = await triageSignal(station.hub, station.world, station.bus, s, radioTranscript(s));
+  await station.shutdown();
+  if (!view) throw new Error('分类失败');
+  return `${s.id}（${s.kind}）：${view.severityChoice} ${JSON.stringify(view.severity)} · 紧急度 ${view.urgency} · 恶作剧 ${view.hoax}`;
+});
+
+await check('脚本编排 · 指挥官写 run_script 一次查询多个信号', async () => {
+  const { station } = liveStation();
+  for (let i = 0; i < 6; i++) station.world.spawnNow();
+  const calls = await commanderRun(station, '现在有 6 个信号。请用 run_script 写一段脚本，一次算出每个信号的燃料消耗与能否及时赶到，列出最划算的 3 个，然后待命。');
+  const end = station.commander.agent.state.messages.find((m) => m.role === 'toolResult' && m.toolName === 'run_script');
+  await station.shutdown();
+  if (!calls.includes('commander:run_script')) throw new Error(`没有用脚本：${calls.join(' → ')}`);
+  return `${calls.join(' → ')}；脚本输出「${end && end.role === 'toolResult' ? end.content.map((c) => (c.type === 'text' ? c.text : '')).join(' ').slice(0, 60) : ''}」`;
 });
 
 const failed = results.filter((r) => !r.ok).length;

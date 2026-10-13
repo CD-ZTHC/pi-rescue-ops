@@ -331,3 +331,21 @@ test('第 21 课：request.meta 的耗时字段；span 树 rescue.run → rescue
   assert.ok(children.includes('rescue.request') && children.includes('rescue.tool'), children.join(','));
   await station.shutdown();
 });
+
+test('第 19 课：回放入库的精选录制，工具调用序列与录制一致', async () => {
+  const { Station } = await import('../runtime/station.ts');
+  const { offlineConfig } = await import('./helpers.ts');
+  const station = new Station(offlineConfig(), { clock: false, journal: false, groundStation: true });
+  station.startFreePlay();
+  const notes: string[] = [];
+  station.bus.subscribe((m) => m.t === 'app' && m.ev.kind === 'lesson' && m.ev.note && notes.push(m.ev.note));
+  const stop = drive(station, 15);
+  try {
+    await station.loadLesson('L19', 'faux');
+  } finally {
+    stop();
+  }
+  assert.equal(station.lesson?.status, 'done', notes.join(' | '));
+  assert.ok(station.replay && station.replay.matched === station.replay.total && station.replay.total > 0);
+  await station.shutdown();
+});

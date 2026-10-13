@@ -59,6 +59,7 @@ const SUMMARIES: Record<number, string> = {
   18: '网关不返回 logprobs，pi-ai 内置的分类器用不了。这里在 GLM provider 上注册了一个模型类型为 classifier 的模型和自定义 ProviderClassifier：把问题编译成工具 schema，用 flash 并行采样 k 次，以经验分布作为概率。k=1 时概率只能是 0 或 1；k=5 时出现 0.2、0.6 这样的中间值。界面上的概率条明确标注「采样估计」。classify() 从不 reject：失败体现在 stopReason。',
   20: 'agentLoop() 是不带状态的低层循环：给它消息、上下文和配置，它返回事件流。这个事件流是「观察性」的——消费者处理得再慢，循环也不等，工具可能在消费者看到 message_end 之前就执行了。Agent 则把 awaited 的 subscribe 监听器纳入运行：message_end 处形成屏障，beforeToolCall 看到的状态里已经包含发起调用的那条 assistant 消息。评审结果里会显示两者的对照。',
   21: '读懂一次请求的耗时：排队等配额（灰色）→ TTFT（白色竖线，onProviderStreamEvent 收到首个 provider 事件的时刻）→ 流式输出 → durationMs（AssistantMessage 自带）→ 工具执行（tool_execution_end.durationMs）。悬停请求条可以看到 token、缓存命中与费用；真实模型下还能展开前 20 个原始 chunk。底栏「Span 树」展示 pi-telemetry 收集的 rescue.run → rescue.request / rescue.tool。',
+  19: 'fauxProvider 不只是测试替身：录制时把每个船员的 AssistantMessage、主管操作、审批决定、分诊结论写进 JSONL；回放时世界用同一个 seed，响应工厂按 system prompt 认出是哪个船员，取他的下一条录制回复，并等世界走到录制时的 tick 才送出。回放产生的工具调用序列必须与录制一致，否则报告首个分歧点。本课回放一段真实 GLM 班次（没有就用离线演示录制），完全不需要 API key。',
   2: 'thinkingLevel 决定 pi 向模型请求多少推理（GLM 使用 thinking: { type }）。同一个问题依次用 off / low / medium 各跑一次，比较请求条里的「思考」斜纹分段、频道中可折叠的思考内容，以及 AssistantMessage.thinkingLevel 字段。注意：glm-5.3-flash 实测会忽略 disabled，UI 按 usage.reasoning 如实显示。',
 };
 
@@ -117,6 +118,8 @@ export interface LessonScript {
   expectTools: string[];
   /** 多个 Agent 并发时调用顺序不确定：只比较集合 */
   expectUnordered?: boolean;
+  /** 回放课：依次尝试这些录制文件（相对 recordings/），用第一个存在的 */
+  replay?: string[];
 }
 
 const textOf = (m: Message | undefined): string =>
@@ -789,7 +792,16 @@ const lesson21: LessonScript = {
   ],
 };
 
-const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson8, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14, lesson15, lesson16, lesson17, lesson18, lesson20, lesson21, lesson22].map((l) => [l.meta.id, l]));
+const lesson19: LessonScript = {
+  meta: meta(19, true, '篡改录制里的一次工具调用：回放会在第一个不一致的地方报告分歧'),
+  seed: 0,
+  spawnSignals: 0,
+  expectTools: [],
+  replay: ['glm-shift-01.jsonl', 'offline-demo.jsonl'],
+  steps: [],
+};
+
+const SCRIPTS: Record<string, LessonScript> = Object.fromEntries([lesson19, lesson1, lesson2, lesson3, lesson4, lesson5, lesson6, lesson7, lesson8, lesson9, lesson10, lesson11, lesson12, lesson13, lesson14, lesson15, lesson16, lesson17, lesson18, lesson20, lesson21, lesson22].map((l) => [l.meta.id, l]));
 
 function meta(index: number, available: boolean, toggle: string, toggleKey?: PolicyKey): LessonMeta {
   const row = ROWS[index - 1];
@@ -807,6 +819,32 @@ function meta(index: number, available: boolean, toggle: string, toggleKey?: Pol
   };
 }
 
+
+/** 讲义用：每课对应的源码（§12 能力覆盖矩阵） */
+export const LESSON_SOURCES: Record<number, string[]> = {
+  1: ['apps/server/src/pi/crew.ts', 'apps/server/src/pi/observe.ts', 'apps/server/src/runtime/bus.ts'],
+  2: ['apps/server/src/pi/models.ts', 'apps/server/src/pi/turn-policy.ts'],
+  3: ['apps/server/src/pi/tools/shared.ts', 'apps/server/src/pi/tools/navigator.ts', 'apps/server/src/pi/hooks/after.ts'],
+  4: ['apps/server/src/pi/tools/commander.ts', 'apps/server/src/pi/tools/navigator.ts'],
+  5: ['apps/server/src/pi/tools/engineer.ts'],
+  6: ['apps/server/src/pi/tools/navigator.ts', 'apps/web/src/comms/ToolCard.tsx'],
+  7: ['apps/server/src/pi/hooks/compose.ts', 'apps/server/src/pi/hooks/approval.ts', 'apps/server/src/pi/hooks/guards.ts', 'apps/server/src/pi/hooks/step-gate.ts'],
+  8: ['apps/server/src/pi/hooks/after.ts', 'apps/ground-station/src/server.ts'],
+  9: ['apps/server/src/pi/turn-policy.ts'],
+  10: ['apps/server/src/pi/turn-policy.ts'],
+  11: ['apps/server/src/pi/crew.ts', 'apps/server/src/runtime/dispatcher.ts', 'apps/server/src/runtime/operator.ts'],
+  12: ['packages/protocol/src/messages.ts', 'apps/server/src/pi/messages.ts'],
+  13: ['apps/server/src/pi/prompts.ts', 'apps/server/src/pi/roster.ts', 'apps/server/src/runtime/station.ts'],
+  14: ['apps/server/src/pi/context.ts', 'apps/server/src/pi/compaction.ts'],
+  15: ['apps/server/src/pi/tools/delegate.ts', 'apps/web/src/inspector/Inspector.tsx'],
+  16: ['apps/server/src/pi/tools/codemode.ts', 'apps/server/src/pi/tools/readonly.ts'],
+  17: ['apps/server/src/pi/tools/ground-station.ts', 'apps/ground-station/src/server.ts'],
+  18: ['apps/server/src/pi/classifier-glm.ts', 'apps/server/src/pi/triage.ts', 'apps/server/src/pi/models.ts'],
+  19: ['apps/server/src/runtime/recorder.ts', 'apps/server/src/runtime/replayer.ts', 'apps/server/src/scripts/record.ts'],
+  20: ['apps/server/src/pi/stateless-judge.ts'],
+  21: ['apps/server/src/pi/observe.ts', 'apps/server/src/pi/telemetry.ts', 'apps/web/src/inspector/RequestDetail.tsx'],
+  22: ['apps/server/src/world/render/', 'apps/server/src/pi/turn-policy.ts', 'apps/server/src/pi/context.ts'],
+};
 
 export function lessonList(): LessonMeta[] {
   return ROWS.map(([index]) => SCRIPTS[`L${String(index).padStart(2, '0')}`]?.meta ?? meta(index, false, ''));

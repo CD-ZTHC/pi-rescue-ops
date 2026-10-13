@@ -1,14 +1,12 @@
-// 主管指令（§3.4）：插话、中止、调速、上下文抽屉、课程切换。审批 / 单步 / 工具试验台在 M3 加入。
+// 主管指令（§3.4）：插话、审批、中止、单步、调速、策略开关、工具试验台、上下文抽屉、课程、回放与恢复。
 import type { ClientMsg } from '@rescue/protocol';
 import { operatorMessage } from '../pi/messages.ts';
 import type { Station } from './station.ts';
 
-const LATER: Partial<Record<ClientMsg['t'], string>> = {
-  'replay.load': 'M7',
-};
 
-export async function handleOperator(station: Station, msg: ClientMsg): Promise<void> {
+export async function handleOperator(station: Station, msg: ClientMsg, opts: { replaying?: boolean } = {}): Promise<void> {
   const { bus } = station;
+  if (!opts.replaying) station.recorder?.operator(msg);
   switch (msg.t) {
     case 'operator.say': {
       const member = station.crew().find((c) => c.id === msg.target);
@@ -79,13 +77,32 @@ export async function handleOperator(station: Station, msg: ClientMsg): Promise<
       station.hub.triageSamples = Math.max(1, Math.min(9, Math.round(msg.k)));
       bus.app({ kind: 'notice', level: 'info', text: `分诊采样数 k=${station.hub.triageSamples}` });
       return;
+    case 'replay.load':
+      try {
+        await station.startReplay(msg.file);
+      } catch (err) {
+        bus.app({ kind: 'replay', status: 'error', file: msg.file, matched: 0, total: 0, note: (err as Error).message });
+      }
+      return;
+    case 'session.restore':
+      try {
+        await station.restoreSession(msg.file);
+      } catch (err) {
+        bus.app({ kind: 'notice', level: 'error', text: `恢复失败：${(err as Error).message}` });
+      }
+      return;
+    case 'files.list':
+      await station.listFiles();
+      return;
     case 'lesson.load':
       void station.loadLesson(msg.lessonId, msg.mode);
       return;
     case 'lesson.exit':
       await station.exitLesson();
       return;
-    default:
-      bus.app({ kind: 'notice', level: 'info', text: `「${msg.t}」在 ${LATER[msg.t] ?? '后续里程碑'} 实现` });
+    default: {
+      const unknown: never = msg;
+      bus.app({ kind: 'notice', level: 'warn', text: `未知指令 ${JSON.stringify(unknown).slice(0, 60)}` });
+    }
   }
 }

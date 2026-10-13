@@ -45,3 +45,11 @@ run = "npm run smoke:live"
 depends = ["typecheck", "test", "test:web", "build"]
 description = "类型检查 + 全部单测 + 构建"
 run = "echo done"
+
+[tasks.docs]
+description = "生成 22 课讲义与 README 能力索引"
+run = "node apps/server/src/scripts/docs.ts"
+
+[tasks.record]
+description = "录制一段离线班次（--live 用真实模型）"
+run = "node '--env-file-if-exists=.env' apps/server/src/scripts/record.ts"

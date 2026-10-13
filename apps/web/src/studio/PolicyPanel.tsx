@@ -7,7 +7,7 @@ import { useUi } from '../store/index.ts';
 const GROUPS = ['beforeToolCall', 'afterToolCall', 'finishTurn', 'prepareRequest', 'transformContext', 'agent_end', 'tools', 'classifier'];
 
 export function PolicyPanel() {
-  const { policyOpen, policy } = useUi();
+  const { policyOpen, policy, info } = useUi();
   return (
     <AnimatePresence>
       {policyOpen && (
@@ -25,6 +25,20 @@ export function PolicyPanel() {
               ✕
             </button>
           </div>
+          <label className="mb-2 flex items-center gap-2 rounded bg-slate-800/60 px-2 py-1">
+            <span className="text-slate-300">分诊采样数 k</span>
+            <select
+              className="num ml-auto rounded border border-slate-700 bg-slate-900 px-1"
+              defaultValue={info?.triageSamples ?? 3}
+              onChange={(e) => send({ t: 'triage.samples', k: Number(e.target.value) })}
+            >
+              {[1, 3, 5, 7].map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1 scrollbar-thin">
             {GROUPS.map((g) => {
               const keys = (Object.keys(POLICY_FLAGS) as PolicyKey[]).filter((k) => POLICY_FLAGS[k].hook === g);

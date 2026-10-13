@@ -5,6 +5,7 @@ import { seconds } from '../app/format.ts';
 import { zh } from '../i18n/zh.ts';
 import { serverNow, runsModel, useModels, useUi } from '../store/index.ts';
 import type { HookMark, RunView, ToolView, TurnView } from '../store/runs.ts';
+import { RequestDetail } from './RequestDetail.tsx';
 
 export function InspectorLegend() {
   return (
@@ -147,6 +148,7 @@ export function Inspector() {
           ⟳ {zh.inspector.follow}
         </button>
       )}
+      <RequestDetail />
       <svg width={size.w} height={totalH} className="block">
         <defs>
           <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -253,7 +255,7 @@ function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) =>
     <g>
       <rect x={x0} y={y + 4} width={x1 - x0} height={h - 8} rx={7} fill={color} fillOpacity={0.05} stroke={outcomeColor} strokeOpacity={0.55} />
       {run.turns.map((turn, i) => (
-        <TurnShape key={i} turn={turn} y={y} x={x} now={now} color={color} focus={props.focus} sequentialTools={props.sequentialTools} />
+        <TurnShape key={i} agentId={run.agentId} turn={turn} y={y} x={x} now={now} color={color} focus={props.focus} sequentialTools={props.sequentialTools} />
       ))}
       {(run.queue.steer > 0 || run.queue.followUp > 0) && (
         <g transform={`translate(${x1 + 4}, ${y + 8})`}>
@@ -273,7 +275,7 @@ function RunShape(props: { run: RunView; y: number; h: number; x: (t: number) =>
   );
 }
 
-function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number; now: number; color: string; focus?: string; sequentialTools: Set<string> }) {
+function TurnShape(props: { agentId: CrewId; turn: TurnView; y: number; x: (t: number) => number; now: number; color: string; focus?: string; sequentialTools: Set<string> }) {
   const { turn, y, x, now, color } = props;
   // 批次里只要有一个 sequential 工具，整批串行（§5.4）
   const serialBy = turn.tools.length > 1 ? turn.tools.find((t) => props.sequentialTools.has(t.name))?.name : undefined;
@@ -300,7 +302,7 @@ function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number;
           T{turn.index + 1}
         </text>
       )}
-      {req && <RequestShape req={req} y={y + REQ_Y} x={x} now={now} color={color} />}
+      {req && <RequestShape req={req} y={y + REQ_Y} x={x} now={now} color={color} agentId={props.agentId} />}
       {turn.tools.map((tool, i) => (
         <ToolShape key={tool.toolCallId} tool={tool} y={y + TOOL_Y + toolRows[i] * (TOOL_H + TOOL_GAP)} x={x} now={now} color={color} focused={props.focus === tool.toolCallId} />
       ))}
@@ -321,7 +323,7 @@ function TurnShape(props: { turn: TurnView; y: number; x: (t: number) => number;
   );
 }
 
-function RequestShape(props: { req: NonNullable<TurnView['request']>; y: number; x: (t: number) => number; now: number; color: string }) {
+function RequestShape(props: { req: NonNullable<TurnView['request']>; y: number; x: (t: number) => number; now: number; color: string; agentId: CrewId }) {
   const { req, y, x, now, color } = props;
   const end = req.end ?? now;
   const queuedStart = req.queuedMs ? req.start - req.queuedMs : undefined;
@@ -329,7 +331,7 @@ function RequestShape(props: { req: NonNullable<TurnView['request']>; y: number;
     req.usage ? `\n输入 ${req.usage.input} · 输出 ${req.usage.output}${req.usage.reasoning !== undefined ? `（推理 ${req.usage.reasoning}）` : ''} · 缓存命中 ${req.usage.cacheRead}` : ''
   }${req.queuedMs ? `\n等待并发配额 ${seconds(req.queuedMs)}` : ''}${req.images ? `\n图片 ${req.images} 张` : ''}`;
   return (
-    <g style={{ color }}>
+    <g style={{ color }} className="cursor-pointer" onPointerDown={(e) => e.stopPropagation()} onClick={() => useUi.setState({ requestDetail: { ...req, agentId: props.agentId } })}>
       <title>{tip}</title>
       {queuedStart !== undefined && req.queuedMs! > 30 && (
         <rect x={x(queuedStart)} y={y + 3} width={Math.max(1, x(req.start) - x(queuedStart))} height={REQ_H - 6} fill="#64748b" opacity={0.5} rx={2} />

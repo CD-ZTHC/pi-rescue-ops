@@ -77,7 +77,10 @@ export class World {
   /** 已执行的命令日志（含生效 tick），用于录制回放 */
   readonly commandLog: Array<{ tick: number; cmd: WorldCommand }> = [];
 
+  readonly options: WorldOptions;
+
   constructor(options: WorldOptions) {
+    this.options = options;
     this.seed = options.seed;
     this.autoSpawn = options.autoSpawn ?? true;
     this.rng = new Rng(options.seed);

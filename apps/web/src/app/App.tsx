@@ -10,6 +10,8 @@ import { useUi } from '../store/index.ts';
 import { ContextDrawer } from '../studio/ContextDrawer.tsx';
 import { PolicyPanel } from '../studio/PolicyPanel.tsx';
 import { ToolBench } from '../studio/ToolBench.tsx';
+import { SpanTree } from '../studio/SpanTree.tsx';
+import { FilesPanel } from '../studio/FilesPanel.tsx';
 import { BottomBar } from './BottomBar.tsx';
 import { Panel } from './Panel.tsx';
 import { Toasts } from './Toasts.tsx';
@@ -122,6 +124,8 @@ export function App() {
       <ContextDrawer />
       <PolicyPanel />
       <ToolBench />
+      <SpanTree />
+      <FilesPanel />
       <Toasts />
       <Lightbox />
     </>

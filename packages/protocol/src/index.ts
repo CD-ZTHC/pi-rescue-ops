@@ -158,6 +158,8 @@ export type AppEvent =
     }
   | { kind: 'queue'; agentId: CrewId; steer: number; followUp: number; preview: string[]; steeringMode: 'all' | 'one-at-a-time'; followUpMode: 'all' | 'one-at-a-time' }
   | { kind: 'policy'; flags: PolicyFlags; stepping: boolean }
+  | { kind: 'replay'; status: 'running' | 'done' | 'diverged' | 'error'; file: string; matched: number; total: number; divergence?: { agentId: CrewId; index: number; expected?: string; got?: string }; note?: string }
+  | { kind: 'files'; recordings: Array<{ file: string; curated: boolean; size: number }>; missions: Array<{ file: string; size: number }> }
   | { kind: 'review'; grade: string; strengths: string[]; improvements: string[]; events: string[]; consumerCaughtUp: boolean; agentBarrier?: boolean; durationMs: number }
   | { kind: 'telemetry'; spans: Array<{ id: number; parentId: number | null; name: string; attributes: Record<string, unknown>; events: Array<{ name: string; attributes?: Record<string, unknown> }>; status: unknown; settled: boolean }> }
   | { kind: 'context.meter'; agentId: CrewId; estTokens: number; viewTokens: number; budget: number; messages: number }
@@ -235,7 +237,9 @@ export type ClientMsg =
   | { t: 'telemetry.request' }
   | { t: 'triage.samples'; k: number }
   | { t: 'queue.mode'; target: CrewId | 'all'; steering: 'all' | 'one-at-a-time'; followUp: 'all' | 'one-at-a-time' }
-  | { t: 'replay.load'; file: string };
+  | { t: 'replay.load'; file: string }
+  | { t: 'session.restore'; file: string }
+  | { t: 'files.list' };
 
 export const CREW_COLORS: Record<CrewId | 'operator' | 'triage' | 'scribe' | 'ground', string> = {
   operator: '#f8fafc',

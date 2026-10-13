@@ -16,6 +16,13 @@ import { GroundStation } from '../pi/tools/ground-station.ts';
 import { isUrgentTriage, triageSignal } from '../pi/triage.ts';
 import { barrierProbe, judgeShift } from '../pi/stateless-judge.ts';
 import { radioTranscript } from '../world/spawner.ts';
+import { Recorder } from './recorder.ts';
+import { loadRecording, ReplayCursor } from './replayer.ts';
+import { handleOperator } from './operator.ts';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { WorldCommand } from '../world/sim.ts';
 import { InMemoryTelemetryContext } from '@earendil-works/pi-telemetry';
 import type { McpTransport } from '@earendil-works/pi-mcp';
 import { World } from '../world/sim.ts';
@@ -37,6 +44,8 @@ export interface StationOptions {
   groundStation?: boolean | (() => McpTransport);
   /** 自由模式下天气卫星在第几秒上线（地面站随之新增预报工具） */
   satelliteAt?: number;
+  /** 自由模式录制目录（不传则不录制） */
+  recordDir?: string;
 }
 
 export interface LessonState {
@@ -69,6 +78,10 @@ export class Station {
   ground?: GroundStation;
   private groundReady?: Promise<void>;
   private readonly satelliteAt: number;
+  private readonly recordDir?: string;
+  recorder?: Recorder;
+  replay?: ReplayCursor;
+  private replayCleanup?: () => void;
   private satelliteOnline = false;
   private offWorld?: () => void;
   private offDispatch?: () => void;
@@ -91,13 +104,24 @@ export class Station {
     }
     this.dispatcher = new Dispatcher({
       crew: (id) => this.members.get(id),
-      triage: (signal, radio) => (this.flags.triage ? triageSignal(this.hub, this.world, this.bus, signal, radio).then(isUrgentTriage) : undefined),
+      triage: (signal, radio) => {
+        if (this.replay) {
+          // 回放：用录制里的分诊结论，不重新分类
+          const t = this.replay.rec.triage.get(signal.id);
+          if (!t) return undefined;
+          this.world.setTriage(signal.id, { severity: t.result.severityChoice, urgency: t.result.urgency, hoax: t.result.hoax });
+          this.bus.app({ kind: 'triage', signalId: signal.id, result: t.result, samples: t.samples, durationMs: 0, model: 'replay' });
+          return Promise.resolve(isUrgentTriage(t.result));
+        }
+        return this.flags.triage ? triageSignal(this.hub, this.world, this.bus, signal, radio).then(isUrgentTriage) : undefined;
+      },
     });
     this.dispatcher.autoDuty = !this.flags.delegation;
     this.stepper = new Stepper(this.bus, () => this.world);
     this.approvals = new ApprovalCenter(this.bus);
     this.hub.setAuxBrain(offlineAux);
     this.satelliteAt = options.satelliteAt ?? 60;
+    this.recordDir = options.recordDir;
     if (options.groundStation) {
       const transport = typeof options.groundStation === 'function' ? options.groundStation() : undefined;
       this.groundReady = this.startGroundStation(transport);
@@ -130,6 +154,165 @@ export class Station {
   async groundStationReady(): Promise<GroundStation | undefined> {
     await this.groundReady;
     return this.ground;
+  }
+
+  /** 录制回放（§9）：同 seed 的世界 + 按船员依次送出的录制回复 + 按 tick 注入的主管操作；校验工具调用序列 */
+  async startReplay(file: string, speed: 0.5 | 1 | 2 = 2): Promise<ReplayCursor> {
+    const rec = await loadRecording(file);
+    this.lessonToken++;
+    await this.quiesce();
+    this.stopReplay();
+    void this.recorder?.close();
+    this.recorder = undefined;
+    this.lesson = null;
+    for (const [k, v] of Object.entries(rec.header.flags ?? {})) this.setPolicy(k as PolicyKey, v as boolean);
+    const cursor = new ReplayCursor(rec, () => this.world.tick);
+    this.replay = cursor;
+    this.hub.backend = 'faux';
+    this.hub.faux.setResponses([]);
+    this.hub.setOfflineBrain(cursor.factory);
+    this.installWorld(new World({ seed: rec.header.seed, autoSpawn: rec.header.autoSpawn, autoHazards: rec.header.autoHazards }));
+    this.dispatcher.enabled = true;
+    if (this.clock) this.world.setSpeed(speed);
+    let finished = false;
+    let shiftEnded = false;
+    const emit = (status: 'running' | 'done' | 'diverged', note?: string) => {
+      if (finished) return;
+      if (status !== 'running') finished = true;
+      this.bus.app({ kind: 'replay', status, file, matched: cursor.matched, total: cursor.total, divergence: cursor.divergence, note });
+    };
+    // 录制回复用完、或班次已结束且船员都空闲时，回放结束
+    const maybeDone = () => {
+      if (finished || this.crew().some((c) => c.isRunning)) return;
+      if (cursor.remaining === 0 || shiftEnded) emit(cursor.divergence ? 'diverged' : 'done', `工具调用吻合 ${cursor.matched}/${cursor.total}`);
+    };
+    const ops = [...rec.operators].sort((a, b) => a.tick - b.tick);
+    const offWorld = this.world.subscribe(({ tick, events }) => {
+      while (ops.length && ops[0].tick <= tick) void handleOperator(this, ops.shift()!.msg, { replaying: true });
+      if (events.some((e) => e.type === 'shift.ended')) {
+        shiftEnded = true;
+        setTimeout(maybeDone, 50);
+      }
+    });
+    this.approvals.onRequest = (info) => {
+      const d = rec.approvals.get(info.toolCallId);
+      if (d) setTimeout(() => this.approvals.decide(info.approvalId, d === 'approve' ? 'approve' : 'deny', '回放：录制时的决定'), 30);
+    };
+    const offBus = this.bus.subscribe((m) => {
+      if (m.t === 'agent' && m.ev.type === 'tool_execution_start') {
+        const div = cursor.observeTool(m.agentId, m.ev.toolName);
+        if (div) emit('diverged', `首个分歧：${div.agentId} 第 ${div.index + 1} 次工具调用，录制 ${div.expected ?? '（无）'}，回放 ${div.got}`);
+      }
+      if (m.t === 'app' && m.ev.kind === 'crew' && m.ev.crew.every((c) => c.status !== 'running')) setTimeout(maybeDone, 50);
+    });
+    this.replayCleanup = () => {
+      offWorld();
+      offBus();
+      this.approvals.onRequest = undefined;
+    };
+    emit('running');
+    return cursor;
+  }
+
+  private async runReplayLesson(script: LessonScript): Promise<void> {
+    // 精选录制入库在 recordings/；本地录制目录（recordDir）也找一下
+    const dirs = [...new Set(['recordings', this.recordDir ?? 'recordings'])];
+    let file: string | undefined;
+    for (const f of script.replay ?? []) {
+      for (const dir of dirs) {
+        if (file) break;
+        try {
+          await stat(join(dir, f));
+          file = join(dir, f);
+        } catch {
+          /* 下一个 */
+        }
+      }
+    }
+    if (!file) {
+      this.bus.app({ kind: 'notice', level: 'warn', text: `没有找到录制文件：${script.replay?.join('、')}` });
+      return;
+    }
+    const cursor = await this.startReplay(file);
+    this.lesson = { meta: script.meta, mode: 'faux', status: 'running' };
+    this.bus.app({ kind: 'lesson', lesson: script.meta, mode: 'faux', status: 'running', note: file });
+    const token = this.lessonToken;
+    await new Promise<void>((resolve) => {
+      const off = this.bus.subscribe((m) => {
+        if (token !== this.lessonToken) return (off(), resolve());
+        if (m.t === 'app' && m.ev.kind === 'replay' && (m.ev.status === 'done' || m.ev.status === 'diverged')) {
+          off();
+          resolve();
+        }
+      });
+    });
+    if (token !== this.lessonToken || !this.lesson) return;
+    this.lesson.status = cursor.divergence ? 'error' : 'done';
+    this.bus.app({ kind: 'lesson', lesson: script.meta, mode: 'faux', status: this.lesson.status, note: cursor.divergence ? `回放分歧：${JSON.stringify(cursor.divergence)}` : `回放一致：${cursor.matched}/${cursor.total}` });
+  }
+
+  private stopReplay(): void {
+    this.replayCleanup?.();
+    this.replayCleanup = undefined;
+    if (this.replay) this.hub.setOfflineBrain(offlineBrain);
+    this.replay = undefined;
+  }
+
+  /**
+   * 会话恢复（§9）：1.1 不再提供 harness 会话存储，这里自己实现。
+   * 世界：用日志里记下的 seed 与命令序列逐 tick 重放（世界只依赖这两样，§6.4）；
+   * 船员：用日志里各船员的 message_end 重建 agent.state.messages。
+   */
+  async restoreSession(file: string): Promise<void> {
+    const lines = (await readFile(file, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const startIdx = lines.findLastIndex((l) => l.t === 'world.start' && !l.lesson);
+    if (startIdx < 0) throw new Error('日志里没有可恢复的自由模式世界');
+    const start = lines[startIdx] as { seed: number; autoSpawn: boolean; autoHazards: boolean };
+    const rest = lines.slice(startIdx + 1);
+    const commands = rest.filter((l) => l.t === 'command') as Array<{ tick: number; cmd: WorldCommand }>;
+    const lastTick = Math.max(0, ...rest.filter((l) => l.t === 'world').map((l) => Number(l.tick)));
+    this.lessonToken++;
+    await this.quiesce();
+    this.stopReplay();
+    this.lesson = null;
+    const world = new World({ seed: start.seed, autoSpawn: start.autoSpawn, autoHazards: start.autoHazards });
+    let ci = 0;
+    while (world.tick < lastTick) {
+      while (ci < commands.length && commands[ci].tick <= world.tick + 1) world.enqueue(commands[ci++].cmd);
+      world.step();
+    }
+    this.hub.backend = this.hub.liveAvailable ? 'live' : 'faux';
+    this.hub.setOfflineBrain(offlineBrain);
+    this.installWorld(world);
+    const transcripts = new Map<CrewId, AgentMessage[]>();
+    for (const l of rest) {
+      const ev = l.ev as { type?: string; message?: AgentMessage } | undefined;
+      if (l.t === 'agent' && ev?.type === 'message_end' && ev.message) {
+        const id = l.agentId as CrewId;
+        (transcripts.get(id) ?? transcripts.set(id, []).get(id)!).push(ev.message);
+      }
+    }
+    for (const m of this.crew()) {
+      const restored = transcripts.get(m.id);
+      if (restored?.length) m.agent.state.messages = [...m.agent.state.messages.filter((x) => x.role === 'system').slice(0, 1), ...restored];
+    }
+    this.dispatcher.enabled = true;
+    const counts = this.crew().map((m) => `${m.spec.name} ${transcripts.get(m.id)?.length ?? 0}`).join('、');
+    this.bus.app({ kind: 'notice', level: 'info', text: `已恢复班次：世界重放到 T+${lastTick}s（${commands.length} 条命令），消息 ${counts}` });
+  }
+
+  async listFiles(): Promise<void> {
+    const ls = async (dir: string, pred: (f: string) => boolean) => {
+      try {
+        const files = (await readdir(dir)).filter(pred);
+        return Promise.all(files.map(async (f) => ({ file: join(dir, f), size: (await stat(join(dir, f))).size })));
+      } catch {
+        return [];
+      }
+    };
+    const recordings = (await ls(this.recordDir ?? 'recordings', (f) => f.endsWith('.jsonl'))).map((r) => ({ ...r, curated: !r.file.endsWith('.local.jsonl') }));
+    const missions = await ls(this.config.missionsDir, (f) => f.endsWith('.jsonl'));
+    this.bus.app({ kind: 'files', recordings, missions });
   }
 
   /** 班末评审（§5.12）：agentLoop 低层循环，同时跑一次 Agent 对照组，量出屏障语义的差别 */
@@ -173,6 +356,7 @@ export class Station {
 
   setPolicy(key: PolicyKey, value: boolean): void {
     this.flags[key] = value;
+    if (!this.replay) this.recorder?.policy(key, value);
     if (key === 'delegation') {
       this.dispatcher.autoDuty = !value;
       if (this.world) this.syncContext();
@@ -224,11 +408,27 @@ export class Station {
   /** 自由模式：自动生成信号与耀斑，离线时由 faux 离线大脑接管 */
   startFreePlay(): void {
     this.lesson = null;
+    this.stopReplay();
     this.hub.backend = this.hub.liveAvailable ? 'live' : 'faux';
     this.hub.faux.setResponses([]);
     this.hub.setOfflineBrain(offlineBrain);
     this.installWorld(new World({ seed: this.config.seed, autoSpawn: this.autoSpawn, autoHazards: this.autoHazards }));
     this.dispatcher.enabled = true;
+    if (this.recordDir) {
+      void this.recorder?.close();
+      this.recorder = new Recorder(join(this.recordDir, `${this.missionId}-${Date.now().toString(36)}.local.jsonl`), () => this.world.tick);
+      this.recorder.start(
+        {
+          seed: this.config.seed,
+          autoSpawn: this.autoSpawn,
+          autoHazards: this.autoHazards,
+          mode: this.hub.backend,
+          models: { commander: this.config.commanderModel, specialist: this.config.specialistModel },
+          flags: { ...this.flags },
+        },
+        this.bus,
+      );
+    }
     this.bus.app({ kind: 'lesson', lesson: null, status: 'done' });
     if (!this.hub.liveAvailable) this.bus.app({ kind: 'notice', level: 'info', text: '未配置 GLM_API_KEY：离线演示模式（faux 离线大脑）' });
   }
@@ -239,12 +439,16 @@ export class Station {
       this.bus.app({ kind: 'notice', level: 'warn', text: `课程 ${id} 尚未实现` });
       return;
     }
+    if (script.replay) return this.runReplayLesson(script);
     if (mode === 'live' && !this.hub.liveAvailable) {
       this.bus.app({ kind: 'notice', level: 'warn', text: '没有 API key，改用 faux 模式' });
       mode = 'faux';
     }
     const token = ++this.lessonToken;
     await this.quiesce();
+    this.stopReplay();
+    void this.recorder?.close();
+    this.recorder = undefined;
     if (script.setup?.groundStation && !this.groundReady) this.groundReady = this.startGroundStation();
     if (this.groundReady) {
       await this.groundReady;
@@ -330,6 +534,14 @@ export class Station {
     }
   }
 
+  private autoSpawnOf(world: World): boolean {
+    return world.options.autoSpawn ?? true;
+  }
+
+  private autoHazardsOf(world: World): boolean {
+    return world.options.autoHazards ?? true;
+  }
+
   private customMessage(c: { role: 'radio' | 'world_event' | 'ui_note' | 'situation'; text: string }) {
     const first = this.world.snapshot().signals[0];
     switch (c.role) {
@@ -382,6 +594,8 @@ export class Station {
 
   async shutdown(): Promise<void> {
     this.world?.stop();
+    this.stopReplay();
+    await this.recorder?.close();
     await this.ground?.close().catch(() => {});
     for (const m of this.members.values()) m.abort();
     await this.journal?.close();
@@ -443,7 +657,11 @@ export class Station {
     this.offDispatch?.();
     this.world?.stop();
     this.world = world;
+    this.journal?.write({ t: 'world.start', seed: world.seed, autoSpawn: this.autoSpawnOf(world), autoHazards: this.autoHazardsOf(world), lesson: this.lesson?.meta.id ?? null, at: Date.now() });
+    let logged = world.commandLog.length;
     this.offWorld = world.subscribe(({ tick, events, patch }) => {
+      // 注意：不能写成 journal?.write({ ...log[logged++] })——没有 journal 时可选链会跳过参数求值，logged 永不递增
+      for (; logged < world.commandLog.length; logged++) this.journal?.write({ t: 'command', ...world.commandLog[logged] });
       if (Object.keys(patch).length) this.bus.world(tick, patch);
       for (const ev of events) this.bus.app({ kind: 'world.event', ev });
       if (events.some((e) => e.type === 'shift.ended') && !this.lesson) void this.review().catch(() => {});
